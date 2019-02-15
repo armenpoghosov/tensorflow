@@ -20,45 +20,54 @@ limitations under the License.
 #include "tensorflow/cc/framework/grad_op_registry.h"
 #include "tensorflow/cc/framework/gradients.h"
 
-namespace tensorflow {
-namespace ops {
-namespace {
+namespace tensorflow
+{
+namespace ops
+{
+namespace
+{
 
 Status SoftmaxGrad(const Scope& scope, const Operation& op,
                    const std::vector<Output>& grad_inputs,
-                   std::vector<Output>* grad_outputs) {
-  // Softmax gradient function.
-  // p = softmax(x) maps from [batch, n] to [batch, m]
-  // dp/dx = [dp0/dx0   ... dp0/dxn-1  ]
-  //         [  ...           ...      ]
-  //         [dpm-1/dx0 ... dpm-1/dxn-1]
-  // dL/dx = dp/dx * dL/dy
-  //
-  // Using alternative formula:
-  // dL/dx = dL/dy * y - sum(dL/dy * y) * y
-  //    = (dL/dy - sum(dL/dy * y)) * y
-  auto y = op.output(0);
-  auto dyy = Mul(scope, grad_inputs[0], y);
-  auto sum = Reshape(scope, Sum(scope, dyy, {1}), {-1, 1});
-  auto sub = Sub(scope, grad_inputs[0], sum);
-  auto dx = Mul(scope, sub, y);
-  grad_outputs->push_back(dx);
-  return scope.status();
+                   std::vector<Output>* grad_outputs)
+{
+    // Softmax gradient function.
+    // p = softmax(x) maps from [batch, n] to [batch, m]
+    // dp/dx = [dp0/dx0   ... dp0/dxn-1  ]
+    //         [  ...           ...      ]
+    //         [dpm-1/dx0 ... dpm-1/dxn-1]
+    // dL/dx = dp/dx * dL/dy
+    //
+    // Using alternative formula:
+    // dL/dx = dL/dy * y - sum(dL/dy * y) * y
+    //    = (dL/dy - sum(dL/dy * y)) * y
+    auto y = op.output(0);
+    auto dyy = Mul(scope, grad_inputs[0], y);
+    auto sum = Reshape(scope, Sum(scope, dyy, {1}), {-1, 1});
+    auto sub = Sub(scope, grad_inputs[0], sum);
+    auto dx = Mul(scope, sub, y);
+    grad_outputs->push_back(dx);
+    return scope.status();
 }
+
 REGISTER_GRADIENT_OP("Softmax", SoftmaxGrad);
 
-bool IsZero(const Scope& scope, const Output& grad) {
-  string op_type_name = grad.op().node()->type_string();
-  if (op_type_name == "ZerosLike" || op_type_name == "Zeros") {
-    return true;
-  }
-  // The Operation we were provided is not named something obvious so
-  // we need to actually look at its contents.
-  // The original python code did this by calling a utility function called
-  // tensor_util.constant_value.
-  // There is no C++ equivalent to tensor_util.constant_value so we do nothing
-  // for the moment.
-  return false;
+bool IsZero(const Scope& scope, const Output& grad)
+{
+    string op_type_name = grad.op().node()->type_string();
+  
+    if (op_type_name == "ZerosLike" || op_type_name == "Zeros")
+    {
+        return true;
+    }
+
+    // The Operation we were provided is not named something obvious so
+    // we need to actually look at its contents.
+    // The original python code did this by calling a utility function called
+    // tensor_util.constant_value.
+    // There is no C++ equivalent to tensor_util.constant_value so we do nothing
+    // for the moment.
+    return false;
 }
 
 // Multiply after broadcasting vec to match dimensions of mat.
@@ -68,47 +77,49 @@ bool IsZero(const Scope& scope, const Output& grad) {
 //
 //   Returns:
 //     A tensor of dimension [D0, D1], the result fo vec * mat.
-Output BroadcastMul(const Scope& scope, const Output& vec, const Output& mat) {
-  auto reshaped = ExpandDims(scope, vec, -1);
-  return Multiply(scope, reshaped, mat);
+Output BroadcastMul(const Scope& scope, const Output& vec, const Output& mat)
+{
+    auto reshaped = ExpandDims(scope, vec, -1);
+    return Multiply(scope, reshaped, mat);
 }
 
-Status SoftmaxCrossEntropyWithLogitsGrad(const Scope& scope,
-                                         const Operation& op,
-                                         const std::vector<Output>& grad_inputs,
-                                         std::vector<Output>* grad_outputs) {
-  // Softmax gradient with cross entropy logits function.
-  // We multiply the backprop for cost with the gradients - op.output[1].
-  // There is no gradient for labels.
+Status SoftmaxCrossEntropyWithLogitsGrad(
+    const Scope& scope, const Operation& op,
+    const std::vector<Output>& grad_inputs, std::vector<Output>* grad_outputs)
+{
+    // Softmax gradient with cross entropy logits function.
+    // We multiply the backprop for cost with the gradients - op.output[1].
+    // There is no gradient for labels.
 
-  // The outputs of the network are at input index 0.
-  auto logits = op.input(0);
-  // The "truth" labels are at index 1.
-  auto softmax_grad = op.output(1);
+    // The outputs of the network are at input index 0.
+    auto logits = op.input(0);
+    // The "truth" labels are at index 1.
+    auto softmax_grad = op.output(1);
 
-  // The loss is the output at index 0, and backprop is the output at index 1.
-  auto grad_loss = grad_inputs[0];
-  auto grad_grad = grad_inputs[1];
+    // The loss is the output at index 0, and backprop is the output at index 1.
+    auto grad_loss = grad_inputs[0];
+    auto grad_grad = grad_inputs[1];
 
-  auto grad = BroadcastMul(scope, grad_loss, softmax_grad);
-  if (!IsZero(scope, grad_grad)) {
-    std::vector<int> axis;
-    auto logits_softmax = Softmax(scope, logits);
+    auto grad = BroadcastMul(scope, grad_loss, softmax_grad);
+    if (!IsZero(scope, grad_grad))
+    {
+        std::vector<int> axis;
+        auto logits_softmax = Softmax(scope, logits);
 
-    auto grad_grad_expand = ExpandDims(scope, grad_grad, 1);
-    auto logits_softmax_expand = ExpandDims(scope, logits_softmax, 2);
-    auto matmul_result =
-        BatchMatMul(scope, grad_grad_expand, logits_softmax_expand);
-    axis.push_back(1);
-    auto squeeze_result = Squeeze(scope, matmul_result, Squeeze::Axis(axis));
-    auto subtraction_result = Subtract(scope, grad_grad, squeeze_result);
-    auto multiply_result = Multiply(scope, subtraction_result, logits_softmax);
-    grad = Add(scope, grad, multiply_result);
-  }
-  auto minus_log_softmax = Multiply(scope, LogSoftmax(scope, logits), -1.0f);
-  grad_outputs->push_back(grad);
-  grad_outputs->push_back(BroadcastMul(scope, grad_loss, minus_log_softmax));
-  return scope.status();
+        auto grad_grad_expand = ExpandDims(scope, grad_grad, 1);
+        auto logits_softmax_expand = ExpandDims(scope, logits_softmax, 2);
+        auto matmul_result = BatchMatMul(scope, grad_grad_expand, logits_softmax_expand);
+        axis.push_back(1);
+        auto squeeze_result = Squeeze(scope, matmul_result, Squeeze::Axis(axis));
+        auto subtraction_result = Subtract(scope, grad_grad, squeeze_result);
+        auto multiply_result = Multiply(scope, subtraction_result, logits_softmax);
+        grad = Add(scope, grad, multiply_result);
+    }
+
+    auto minus_log_softmax = Multiply(scope, LogSoftmax(scope, logits), -1.0f);
+    grad_outputs->push_back(grad);
+    grad_outputs->push_back(BroadcastMul(scope, grad_loss, minus_log_softmax));
+    return scope.status();
 }
 REGISTER_GRADIENT_OP("SoftmaxCrossEntropyWithLogits",
                      SoftmaxCrossEntropyWithLogitsGrad);

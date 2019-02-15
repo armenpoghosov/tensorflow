@@ -19,26 +19,31 @@ limitations under the License.
 #include "tensorflow/cc/ops/image_ops_internal.h"
 #include "tensorflow/cc/ops/standard_ops.h"
 
-namespace tensorflow {
-namespace ops {
-namespace {
+namespace tensorflow
+{
+namespace ops
+{
+namespace
+{
 
 Status ResizeNearestNeighborGradHelper(const Scope& scope, const Operation& op,
-                                       const std::vector<Output>& grad_inputs,
-                                       std::vector<Output>* grad_outputs) {
-  bool align_corners;
-  TF_RETURN_IF_ERROR(
-      GetNodeAttr(op.node()->attrs(), "align_corners", &align_corners));
-  // The internal gradient implementation needs the shape of the input image.
-  // x_shape = shape(x)[1:3]
-  //         = slice(shape(x), {1}, {3 - 1})
-  auto x_shape = Slice(scope, Shape(scope, op.input(0)), {1}, {2});
-  grad_outputs->push_back(internal::ResizeNearestNeighborGrad(
-      scope, grad_inputs[0], x_shape,
-      internal::ResizeNearestNeighborGrad::AlignCorners(align_corners)));
-  grad_outputs->push_back(NoGradient());
-  return scope.status();
+    const std::vector<Output>& grad_inputs, std::vector<Output>* grad_outputs)
+{
+    bool align_corners;
+
+    TF_RETURN_IF_ERROR(GetNodeAttr(op.node()->attrs(), "align_corners", &align_corners));
+
+    // The internal gradient implementation needs the shape of the input image.
+    // x_shape = shape(x)[1:3]
+    //         = slice(shape(x), {1}, {3 - 1})
+    auto x_shape = Slice(scope, Shape(scope, op.input(0)), {1}, {2});
+    grad_outputs->push_back(internal::ResizeNearestNeighborGrad(
+        scope, grad_inputs[0], x_shape,
+        internal::ResizeNearestNeighborGrad::AlignCorners(align_corners)));
+    grad_outputs->push_back(NoGradient());
+    return scope.status();
 }
+
 REGISTER_GRADIENT_OP("ResizeNearestNeighbor", ResizeNearestNeighborGradHelper);
 
 Status ResizeBilinearGradHelper(const Scope& scope, const Operation& op,

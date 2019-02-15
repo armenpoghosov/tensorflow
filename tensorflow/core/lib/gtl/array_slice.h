@@ -21,8 +21,10 @@ limitations under the License.
 // on it. Remove all targets' dependencies.
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 
-namespace tensorflow {
-namespace gtl {
+namespace tensorflow
+{
+namespace gtl
+{
 
 template <typename T>
 using ArraySlice = absl::Span<const T>;

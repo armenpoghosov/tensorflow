@@ -20,17 +20,20 @@ limitations under the License.
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
 
-namespace tensorflow {
+namespace tensorflow
+{
 
 // Represents the output of 'node' at 'index'.
-struct NodeOut {
-  Node* node;
-  int index;
+struct NodeOut
+{
+    Node*   node;
+    int     index;
 
-  // Returns the string name that represents the output of this node.
-  string name() const;
-  // Returns the data type of the output of this node.
-  DataType dtype() const;
+    // Returns the string name that represents the output of this node.
+    string name() const;
+
+    // Returns the data type of the output of this node.
+    DataType dtype() const;
 };
 
 // NOTE: This API is a work in progress and will likely be changing frequently.
@@ -47,11 +50,10 @@ struct NodeOut {
 // implementation only supports gradients for functions). In particular,
 // the nodes in 'x_nodes' are currently restricted to have one output.
 
-Status AddSymbolicGradients(gtl::ArraySlice<NodeOut> y_node_outputs,
-                            gtl::ArraySlice<NodeOut> x_node_outputs,
-                            gtl::ArraySlice<NodeOut> y_grad_node_outputs,
-                            std::vector<NodeOut>* x_grad_node_outputs,
-                            Graph* graph);
+Status AddSymbolicGradients(
+    gtl::ArraySlice<NodeOut> y_node_outputs, gtl::ArraySlice<NodeOut> x_node_outputs,
+    gtl::ArraySlice<NodeOut> y_grad_node_outputs, std::vector<NodeOut>* x_grad_node_outputs,
+    Graph* graph);
 
 }  // namespace tensorflow
 
