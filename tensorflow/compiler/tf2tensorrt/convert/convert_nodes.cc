@@ -192,6 +192,15 @@ Status ValidateTensorProperties(const string& producer_node_type,
   *trt_dims = TensorShapeToTrtDims(shape, /*ignore_first_dim=*/true);
   *batch_size = shape.dim_size(0);
 
+  // Don't convert empty tensors (dim value of 0).
+  for (int d = 1; d < shape.dims(); ++d) {
+    if (shape.dim_size(d) == 0) {
+      return errors::Unimplemented(
+          "Input tensor with shape ", shape.DebugString(),
+          " is an empty tensor, which is not supported by TRT");
+    }
+  }
+
   if (validation_only) return Status::OK();
   // Following are validations at runtime.
 
@@ -561,6 +570,16 @@ class TRT_TensorOrWeights::SimpleITensor : public nvinfer1::ITensor {
   bool setDynamicRange(float min, float max) override { return true; }
 
   float getDynamicRange() const override { return 0; }
+#endif
+
+#if NV_TENSORRT_MAJOR > 5 || (NV_TENSORRT_MAJOR == 5 && NV_TENSORRT_MINOR >= 1)
+  bool dynamicRangeIsSet() const override { return true; }
+
+  void resetDynamicRange() override {}
+
+  float getDynamicRangeMin() const override { return 0.f; }
+
+  float getDynamicRangeMax() const override { return 0.f; }
 #endif
 
  private:
