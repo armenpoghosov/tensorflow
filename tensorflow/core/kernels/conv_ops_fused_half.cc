@@ -1,4 +1,4 @@
-/* Copyright 2015 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -13,15 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// DO NOT EDIT: automatically generated file
-#ifndef CUDA_CUDA_CONFIG_H_
-#define CUDA_CUDA_CONFIG_H_
+#include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/kernels/conv_ops_fused_impl.h"
 
-#define TF_CUDA_CAPABILITIES CudaVersion("3.0")
+namespace tensorflow {
 
-#define TF_CUDA_VERSION "10.0"
-#define TF_CUDNN_VERSION "7"
+#if GOOGLE_CUDA
 
-#define TF_CUDA_TOOLKIT_PATH "/usr/local/cuda-10.0"
+namespace functor {
+DECLARE_FUNCTOR_GPU_SPEC(Eigen::half);
+}  // namespace functor
 
-#endif  // CUDA_CUDA_CONFIG_H_
+#endif  // GOOGLE_CUDA
+
+}  // namespace tensorflow
