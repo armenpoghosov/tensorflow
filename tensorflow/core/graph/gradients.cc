@@ -132,17 +132,18 @@ static Node* AddSymGrad(Graph* g, Node* n, gtl::ArraySlice<NodeOut> grads)
     {
         if (e->IsControlEdge())
             continue;
-        n_inputs[e->dst_input()] = {e->src(), e->src_output()};
+
+        n_inputs[e->dst_input()] = { e->src(), e->src_output() };
     }
 
     DataTypeVector in_types;
-    for (const NodeOut& nout : n_inputs)
+    for (NodeOut const& nout : n_inputs)
     {
         ndef.add_input(nout.name());
         in_types.push_back(nout.dtype());
     }
 
-    for (const NodeOut& nout : grads)
+    for (NodeOut const& nout : grads)
     {
         ndef.add_input(nout.name());
         in_types.push_back(nout.dtype());
@@ -168,12 +169,12 @@ static Node* AddSymGrad(Graph* g, Node* n, gtl::ArraySlice<NodeOut> grads)
     
     NameAttrList func;
     func.set_name(n->type_string());
-    for (const auto& attr : n->attrs())
+    for (auto const& attr : n->attrs())
     {
         (*func.mutable_attr())[attr.first] = attr.second;
     }
     AddNodeAttr("f", func, &ndef);
-    
+
     Status s;
     Node* ret = g->AddNode(ndef, &s);
     TF_CHECK_OK(s);
@@ -304,8 +305,12 @@ void SymbolicGradientBuilder::InitBackprop()
 
         for (const NodeOut& nout : x_node_outputs_)
         {
-            queue.push_back(nout.node);
-            visited.insert(nout.node);
+            auto const& pair = visited.insert(nout.node);
+
+            if (pair.second)
+            {
+                queue.push_back(nout.node);
+            }
         }
 
         // Going forward to figure out which endpoints need backprop-ed.
@@ -318,7 +323,7 @@ void SymbolicGradientBuilder::InitBackprop()
 
             for (int i = 0; i < n->num_outputs(); ++i)
             {
-                backprops_[{n, i}].clear();
+                backprops_[{n, i}];
             }
 
             int num_expected_backprops = 0;
@@ -343,13 +348,13 @@ void SymbolicGradientBuilder::InitBackprop()
     }
 
     {
-        const int num_y = y_grad_node_outputs_.size();
+        int const num_y = y_grad_node_outputs_.size();
 
         for (int i = 0; i < num_y; ++i)
         {
             Node* y = y_node_outputs_[i].node;
 
-            for (const Edge* e : y->in_edges())
+            for (Edge const* e : y->in_edges())
             {
                 if (e->IsControlEdge())
                     continue;
@@ -362,17 +367,19 @@ void SymbolicGradientBuilder::InitBackprop()
     CHECK(!ready_.empty());
 }
 
-NodeOut SymbolicGradientBuilder::SumGradients(const NodeOut& src)
+NodeOut SymbolicGradientBuilder::SumGradients(NodeOut const& src)
 {
-    const DataType dtype = src.dtype();
+    DataType const dtype = src.dtype();
+    
     auto iter = backprops_.find(src);
     CHECK(iter != backprops_.end());
+
     const auto& grads = iter->second;
     if (grads.empty())
     {
         // Nothing propagated back. The best we can come up is zeros.
         Node* zero_like = AddZerosLike(graph_, src);
-        return {zero_like, 0};
+        return { zero_like, 0 };
     }
 
     if (grads.size() == 1)
@@ -385,7 +392,7 @@ NodeOut SymbolicGradientBuilder::SumGradients(const NodeOut& src)
     NodeDef ndef;
     ndef.set_name(graph_->NewName(kNodeLabel));
     ndef.set_op("AddN");  // N-way Add
-    for (const NodeOut& nout : grads)
+    for (NodeOut const& nout : grads)
     {
         ndef.add_input(nout.name());
     }
@@ -397,11 +404,11 @@ NodeOut SymbolicGradientBuilder::SumGradients(const NodeOut& src)
     TF_CHECK_OK(s);
     for (size_t i = 0; i < grads.size(); ++i)
     {
-        const NodeOut& nout = grads[i];
+        NodeOut const& nout = grads[i];
         graph_->AddEdge(nout.node, nout.index, add, i);
     }
 
-    return {add, 0};
+    return NodeOut { add, 0 };
 }
 
 static bool IsPrimitiveOpWithNoGrad(const string& func)
@@ -426,8 +433,8 @@ Status SymbolicGradientBuilder::Compute()
         ready_.pop_front();
 
         // "n" has num_x inputs and num_y outputs.
-        const int num_x = n->num_inputs();
-        const int num_y = n->num_outputs();
+        int const num_x = n->num_inputs();
+        int const num_y = n->num_outputs();
 
         auto iter = stop_nodes_.find(n->id());
         if (iter != stop_nodes_.end())
@@ -440,7 +447,7 @@ Status SymbolicGradientBuilder::Compute()
 
         // dy[i] is the sum of i-th output's backpropped gradients.
         dy.clear();
-        dy.resize(num_y, {nullptr, 0});
+        dy.resize(num_y, NodeOut { nullptr, 0 });
 
         for (int i = 0; i < num_y; ++i)
         {
@@ -450,10 +457,11 @@ Status SymbolicGradientBuilder::Compute()
         if (IsPrimitiveOpWithNoGrad(n->type_string()))
         {
             // No grad defined for this op: Backprop zeros along the in edges.
-            for (const Edge* e : n->in_edges())
+            for (Edge const* e : n->in_edges())
             {
                 if (e->IsControlEdge())
                     continue;
+
                 BackpropZerosAlongEdge({e->src(), e->src_output()});
             }
 
@@ -464,10 +472,12 @@ Status SymbolicGradientBuilder::Compute()
         // outputs.
         // TODO(andydavis) Support primitive gradient ops.
         Node* grad = AddSymGrad(graph_, n, dy);
-        for (const Edge* e : n->in_edges())
+
+        for (Edge const* e : n->in_edges())
         {
             if (e->IsControlEdge())
                 continue;
+
             graph_->AddEdge(e->src(), e->src_output(), grad, e->dst_input());
         }
 
@@ -481,7 +491,8 @@ Status SymbolicGradientBuilder::Compute()
         {
             if (e->IsControlEdge())
                 continue;
-            BackpropAlongEdge({grad, e->dst_input()}, {e->src(), e->src_output()});
+
+            BackpropAlongEdge(NodeOut { grad, e->dst_input() }, NodeOut { e->src(), e->src_output() });
         }
     }
 
