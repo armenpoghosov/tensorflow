@@ -519,6 +519,7 @@ Status SymbolicGradientBuilder::ProcessWhileLoop(Node* exit_node, Output const& 
             TF_RETURN_IF_ERROR(BackpropAlongEdge(dx[i], {e->src(), e->src_output()}));
         }
     }
+
     return Status::OK();
 }
 
