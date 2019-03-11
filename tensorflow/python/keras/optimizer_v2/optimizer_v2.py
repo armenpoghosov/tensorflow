@@ -358,7 +358,8 @@ class OptimizerV2(trackable.Trackable):
       ValueError: In case any gradient cannot be computed (e.g. if gradient
         function not implemented).
     """
-    grads = gradients.gradients(loss, params)
+    with backend.get_graph().as_default():
+      grads = gradients.gradients(loss, params)
     if None in grads:
       raise ValueError("An operation has `None` for gradient. "
                        "Please make sure that all of your ops have a "
@@ -526,11 +527,13 @@ class OptimizerV2(trackable.Trackable):
             initializer, shape=var.shape, dtype=var.dtype)
       else:
         initial_value = initializer
-      weight = tf_variables.Variable(
-          name="%s/%s" % (var._shared_name, slot_name),  # pylint: disable=protected-access
-          dtype=var.dtype,
-          trainable=False,
-          initial_value=initial_value)
+      strategy = distribute_ctx.get_strategy()
+      with strategy.colocate_vars_with(var):
+        weight = tf_variables.Variable(
+            name="%s/%s" % (var._shared_name, slot_name),  # pylint: disable=protected-access
+            dtype=var.dtype,
+            trainable=False,
+            initial_value=initial_value)
       backend.track_variable(weight)
       slot_dict[slot_name] = weight
       self._restore_slot_variable(
