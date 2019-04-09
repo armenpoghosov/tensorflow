@@ -175,6 +175,11 @@ cc_library(
         "optimized/depthwiseconv_float.h",
         "optimized/depthwiseconv_uint8.h",
         "optimized/depthwiseconv_uint8_3x3_filter.h",
+        "optimized/im2col_utils.h",
+        "optimized/integer_ops/conv.h",
+        "optimized/integer_ops/fully_connected.h",
+        "optimized/integer_ops/pooling.h",
+        "optimized/integer_ops/softmax.h",
         "optimized/optimized_ops.h",
     ],
     copts = tflite_copts(),
@@ -184,6 +189,7 @@ cc_library(
         ":types",
         ":reference_base",
         ":round",
+        ":tensor",
         ":tensor_utils",
         "//third_party/eigen3",
         "@gemmlowp",
@@ -209,6 +215,7 @@ cc_library(
         "optimized/depthwiseconv_float.h",
         "optimized/depthwiseconv_uint8.h",
         "optimized/depthwiseconv_uint8_3x3_filter.h",
+        "optimized/im2col_utils.h",
         "optimized/legacy_optimized_ops.h",
         "optimized/optimized_ops.h",
     ],
@@ -216,6 +223,7 @@ cc_library(
     deps = [
         ":quantization_util",
         ":strided_slice_logic",
+        ":tensor",
         ":tensor_utils",
         ":types",
         ":legacy_types",
@@ -252,6 +260,7 @@ cc_library(
         ":tensor",
         ":types",
         "//tensorflow/core/kernels:eigen_spatial_convolutions-inl",
+        "//tensorflow/lite:string_util",
         "//tensorflow/lite/c:c_api_internal",
         "//third_party/eigen3",
     ],
@@ -311,6 +320,7 @@ cc_library(
     srcs = [],
     hdrs = [
         "common.h",
+        "reference/conv.h",
         "reference/depthwiseconv_float.h",
         "reference/depthwiseconv_uint8.h",
         "reference/fully_connected.h",
@@ -322,6 +332,7 @@ cc_library(
         "reference/integer_ops/l2normalization.h",
         "reference/integer_ops/log_softmax.h",
         "reference/integer_ops/logistic.h",
+        "reference/integer_ops/mean.h",
         "reference/integer_ops/mul.h",
         "reference/integer_ops/pooling.h",
         "reference/integer_ops/softmax.h",
@@ -333,6 +344,7 @@ cc_library(
         ":quantization_util",
         ":round",
         ":strided_slice_logic",
+        ":tensor",
         ":types",
         "@gemmlowp",
         "//tensorflow/lite/c:c_api_internal",
@@ -355,6 +367,7 @@ cc_library(
     srcs = [],
     hdrs = [
         "common.h",
+        "reference/conv.h",
         "reference/depthwiseconv_float.h",
         "reference/depthwiseconv_uint8.h",
         "reference/fully_connected.h",
@@ -367,6 +380,7 @@ cc_library(
         ":round",
         ":strided_slice_logic",
         ":legacy_types",
+        ":tensor",
         ":types",
         "@gemmlowp",
         "//tensorflow/lite/c:c_api_internal",
@@ -392,6 +406,7 @@ cc_library(
     ],
     deps = [
         ":types",
+        "//tensorflow/lite:string_util",
         "//tensorflow/lite/c:c_api_internal",
     ],
 )
@@ -405,6 +420,7 @@ cc_library(
     ],
     deps = [
         ":types",
+        "//tensorflow/lite:string_util",
         "//tensorflow/lite/c:c_api_internal",
     ],
 )
@@ -646,7 +662,7 @@ cc_test(
     srcs = [
         "softmax_quantized_test.cc",
     ],
-    shard_count = 3,
+    shard_count = 4,
     deps = [
         ":optimized_base",
         ":quantization_util",
@@ -669,6 +685,40 @@ cc_test(
         "nomac",
         "tflite_not_portable",
     ],
+    deps = [
+        ":optimized_base",
+        ":quantization_util",
+        ":reference_base",
+        ":test_util",
+        "//tensorflow/lite:string",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "averagepool_quantized_test",
+    timeout = "long",
+    srcs = [
+        "averagepool_quantized_test.cc",
+    ],
+    shard_count = 1,
+    deps = [
+        ":optimized_base",
+        ":quantization_util",
+        ":reference_base",
+        ":test_util",
+        "//tensorflow/lite:string",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "maxpool_quantized_test",
+    timeout = "long",
+    srcs = [
+        "maxpool_quantized_test.cc",
+    ],
+    shard_count = 1,
     deps = [
         ":optimized_base",
         ":quantization_util",

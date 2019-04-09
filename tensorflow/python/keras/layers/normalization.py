@@ -18,7 +18,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.python import tf2
 from tensorflow.python.distribute import distribution_strategy_context
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
@@ -39,7 +38,6 @@ from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variables as tf_variables
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util.tf_export import keras_export
-from tensorflow.python.util.tf_export import tf_export
 
 
 class BatchNormalizationBase(Layer):
@@ -131,7 +129,7 @@ class BatchNormalizationBase(Layer):
       Internal Covariate Shift](https://arxiv.org/abs/1502.03167)
   """
 
-  # By default, the base class uses V2 behavior. The BatchNormalizationV1
+  # By default, the base class uses V2 behavior. The BatchNormalization V1
   # subclass sets this to False to use the V1 behavior.
   _USE_V2_BEHAVIOR = True
 
@@ -594,7 +592,7 @@ class BatchNormalizationBase(Layer):
       return outputs
 
     # Compute the axes along which to reduce the mean / variance
-    input_shape = inputs.get_shape()
+    input_shape = inputs.shape
     ndims = len(input_shape)
     reduction_axes = [i for i in range(ndims) if i not in self.axis]
     if self.virtual_batch_size is not None:
@@ -605,8 +603,7 @@ class BatchNormalizationBase(Layer):
     broadcast_shape = [1] * ndims
     broadcast_shape[self.axis[0]] = input_shape.dims[self.axis[0]].value
     def _broadcast(v):
-      if (v is not None and
-          len(v.get_shape()) != ndims and
+      if (v is not None and len(v.shape) != ndims and
           reduction_axes != list(range(ndims - 1))):
         return array_ops.reshape(v, broadcast_shape)
       return v
@@ -785,7 +782,7 @@ def _replace_in_base_docstring(old, new):
 
 
 @keras_export(v1=['keras.layers.BatchNormalization'])  # pylint: disable=missing-docstring
-class BatchNormalizationV1(BatchNormalizationBase):
+class BatchNormalization(BatchNormalizationBase):
 
   __doc__ = _replace_in_base_docstring(
       '''
@@ -801,34 +798,7 @@ class BatchNormalizationV1(BatchNormalizationBase):
   _USE_V2_BEHAVIOR = False
 
 
-@keras_export('keras.layers.BatchNormalization', v1=[])  # pylint: disable=missing-docstring
-class BatchNormalizationV2(BatchNormalizationBase):
-
-  pass
-
-
-BatchNormalization = None  # pylint: disable=invalid-name
-
-
-@tf_export(v1=['enable_v2_batch_normalization'])
-def enable_v2_batch_normalization():
-  global BatchNormalization  # pylint: disable=invalid-name
-  BatchNormalization = BatchNormalizationV2
-
-
-@tf_export(v1=['disable_v2_batch_normalization'])
-def disable_v2_batch_normalization():
-  global BatchNormalization  # pylint: disable=invalid-name
-  BatchNormalization = BatchNormalizationV1
-
-
-if tf2.enabled():
-  enable_v2_batch_normalization()
-else:
-  disable_v2_batch_normalization()
-
-
-@keras_export('keras.layers.experimental.LayerNormalization')
+@keras_export('keras.layers.LayerNormalization')
 class LayerNormalization(Layer):
   """Layer normalization layer (Ba et al., 2016).
 
@@ -837,28 +807,9 @@ class LayerNormalization(Layer):
   i.e. applies a transformation that maintains the mean activation within each
   example close to 0 and the activation standard deviation close to 1.
 
-  Given a tensor `inputs` of rank `R`, moments are calculated and normalization
-  is performed over all axes in norm_axis.  Scaling and centering,
-  if requested, is performed over all axes in params_axis.
-
-  By default, normalization is performed over all but the first axis
-  (the `HWC` if `inputs` is `NHWC`), while the `beta` and `gamma` trainable
-  parameters are calculated for the rightmost axis (the `C` if `inputs` is
-  `NHWC`).  Scaling and recentering is performed via broadcast of the
-  `beta` and `gamma` parameters with the normalized tensor.
-
-  The shapes of `beta` and `gamma` are
-  `[inputs.shape[i] for i in (param axes)]`,
-  and this part of the inputs' shape must be fully defined.
-
   Arguments:
-    norm_axis: Integer or List. normalization will be
-      performed along these dimensions. If unspecified (None), it will default
-      to the dimensions `begin_norm_axis : rank(inputs)`
-    params_axis: Integer or List. The (beta, gamma) dimensions: scale
-      and centering parameters will have take their shapes from these axes and
-      will be broadcast with the normalized inputs accordingly. If unspecified
-      (None), it will default to the last dimension
+    axis: Integer or List/Tuple. The axis that should be normalized
+      (typically the features axis).
     epsilon: Small float added to variance to avoid dividing by zero.
     center: If True, add offset of `beta` to normalized tensor.
         If False, `beta` is ignored.
@@ -888,9 +839,8 @@ class LayerNormalization(Layer):
   """
 
   def __init__(self,
-               norm_axis=None,
-               params_axis=-1,
-               epsilon=1e-12,
+               axis=-1,
+               epsilon=1e-3,
                center=True,
                scale=True,
                beta_initializer='zeros',
@@ -904,23 +854,13 @@ class LayerNormalization(Layer):
                **kwargs):
     super(LayerNormalization, self).__init__(
         name=name, trainable=trainable, **kwargs)
-    if isinstance(norm_axis, list):
-      self.norm_axis = norm_axis[:]
-    elif isinstance(norm_axis, int):
-      self.norm_axis = norm_axis
-    elif norm_axis is None:
-      self.norm_axis = None
+    if isinstance(axis, (list, tuple)):
+      self.axis = axis[:]
+    elif isinstance(axis, int):
+      self.axis = axis
     else:
-      raise TypeError('norm_axis must be int or list or None, type given: %s'
-                      % type(norm_axis))
-
-    if isinstance(params_axis, list):
-      self.params_axis = params_axis[:]
-    elif isinstance(params_axis, int):
-      self.params_axis = params_axis
-    else:
-      raise TypeError('params_axis must be int or list, type given: %s'
-                      % type(params_axis))
+      raise ValueError('Expected an int or a list/tuple of ints for the '
+                       'argument \'axis\', but received instead: %s' % axis)
 
     self.epsilon = epsilon
     self.center = center
@@ -939,38 +879,21 @@ class LayerNormalization(Layer):
     if ndims is None:
       raise ValueError('Input shape %s has undefined rank.' % input_shape)
 
-    # Handle an unspecified norm_axis
-    if self.norm_axis is None:
-      self.norm_axis = list(range(1, ndims))
-
-    # Convert axes to lists and resolve negatives
-    if isinstance(self.norm_axis, int):
-      self.norm_axis = [self.norm_axis]
-    for idx, x in enumerate(self.norm_axis):
+    # Convert axis to list and resolve negatives
+    if isinstance(self.axis, int):
+      self.axis = [self.axis]
+    for idx, x in enumerate(self.axis):
       if x < 0:
-        self.norm_axis[idx] = ndims + x
-
-    if isinstance(self.params_axis, int):
-      self.params_axis = [self.params_axis]
-    for idx, x in enumerate(self.params_axis):
-      if x < 0:
-        self.params_axis[idx] = ndims + x
+        self.axis[idx] = ndims + x
 
     # Validate axes
-    for x in self.norm_axis:
+    for x in self.axis:
       if x < 0 or x >= ndims:
         raise ValueError('Invalid axis: %d' % x)
-    if len(self.norm_axis) != len(set(self.norm_axis)):
-      raise ValueError('Duplicate axis: %s' % self.norm_axis)
+    if len(self.axis) != len(set(self.axis)):
+      raise ValueError('Duplicate axis: {}'.format(tuple(self.axis)))
 
-    for x in self.params_axis:
-      if x < 0 or x >= ndims:
-        raise ValueError('Invalid axis: %d' % x)
-    if len(self.params_axis) != len(set(self.params_axis)):
-      raise ValueError('Duplicate axis: %s' % self.params_axis)
-
-    param_shape = [input_shape[dim] for dim in self.params_axis]
-
+    param_shape = [input_shape[dim] for dim in self.axis]
     if self.scale:
       self.gamma = self.add_weight(
           name='gamma',
@@ -997,21 +920,20 @@ class LayerNormalization(Layer):
 
   def call(self, inputs):
     # Compute the axes along which to reduce the mean / variance
-    input_shape = inputs.get_shape()
+    input_shape = inputs.shape
     ndims = len(input_shape)
 
     # Calculate the moments on the last axis (layer activations).
-    mean, variance = nn.moments(inputs, self.norm_axis, keep_dims=True)
+    mean, variance = nn.moments(inputs, self.axis, keep_dims=True)
 
-    # Broadcasting only necessary for norm where the params axes aren't just
+    # Broadcasting only necessary for norm where the axis is not just
     # the last dimension
     broadcast_shape = [1] * ndims
-    for dim in self.params_axis:
+    for dim in self.axis:
       broadcast_shape[dim] = input_shape.dims[dim].value
     def _broadcast(v):
-      if (v is not None and
-          len(v.get_shape()) != ndims and
-          self.params_axis != [ndims - 1]):
+      if (v is not None and len(v.shape) != ndims and
+          self.axis != [ndims - 1]):
         return array_ops.reshape(v, broadcast_shape)
       return v
     scale, offset = _broadcast(self.gamma), _broadcast(self.beta)
@@ -1035,8 +957,7 @@ class LayerNormalization(Layer):
 
   def get_config(self):
     config = {
-        'norm_axis': self.norm_axis,
-        'params_axis': self.params_axis,
+        'axis': self.axis,
         'epsilon': self.epsilon,
         'center': self.center,
         'scale': self.scale,

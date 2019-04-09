@@ -18,6 +18,8 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
+
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import config
@@ -25,9 +27,11 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import test_ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
+from tensorflow.python.util import compat
 
 
 def reset_eager(fn):
@@ -42,7 +46,7 @@ def reset_eager(fn):
   return wrapper
 
 
-class ConfigTest(test.TestCase):
+class ConfigTest(test.TestCase, parameterized.TestCase):
 
   @test_util.run_gpu_only
   @reset_eager
@@ -56,8 +60,7 @@ class ConfigTest(test.TestCase):
     config.set_device_policy('silent')
     config.set_intra_op_parallelism_threads(2)
 
-    # Excute a dummy op to ensure that the context has been initialized
-    constant_op.constant(1)
+    context.ensure_initialized()
 
     def copy_tensor(dtype=dtypes.int32):
       cpu_tensor = constant_op.constant(1, dtype=dtype)
@@ -121,7 +124,8 @@ class ConfigTest(test.TestCase):
         config.get_gpu_per_process_memory_fraction(),
         context.context().gpu_per_process_memory_fraction)
 
-    constant_op.constant(1)
+    context.ensure_initialized()
+
     with self.assertRaises(RuntimeError):
       config.set_gpu_per_process_memory_fraction(0.5)
 
@@ -141,7 +145,8 @@ class ConfigTest(test.TestCase):
         config.get_gpu_per_process_memory_growth(),
         context.context().gpu_per_process_memory_growth)
 
-    constant_op.constant(1)
+    context.ensure_initialized()
+
     with self.assertRaises(RuntimeError):
       config.set_gpu_per_process_memory_growth(True)
 
@@ -152,7 +157,8 @@ class ConfigTest(test.TestCase):
         config.get_intra_op_parallelism_threads(),
         context.context().intra_op_parallelism_threads)
 
-    constant_op.constant(1)
+    context.ensure_initialized()
+
     with self.assertRaises(RuntimeError):
       config.set_intra_op_parallelism_threads(1)
 
@@ -163,14 +169,18 @@ class ConfigTest(test.TestCase):
         config.get_inter_op_parallelism_threads(),
         context.context().inter_op_parallelism_threads)
 
-    constant_op.constant(1)
+    context.ensure_initialized()
+
     with self.assertRaises(RuntimeError):
       config.set_inter_op_parallelism_threads(1)
 
   @test_util.run_gpu_only
   @reset_eager
   def testSoftPlacement(self):
-    self.assertEqual(config.get_soft_device_placement(), True)
+    if context.executing_eagerly():
+      self.assertTrue(config.get_soft_device_placement())
+    else:
+      self.assertFalse(config.get_soft_device_placement())
 
     @def_function.function
     def mod():
@@ -178,6 +188,12 @@ class ConfigTest(test.TestCase):
         a = constant_op.constant(1.0)
         b = constant_op.constant(1.0)
         return math_ops.mod(a, b)
+
+    config.set_soft_device_placement(True)
+    self.assertEqual(config.get_soft_device_placement(), True)
+    self.assertEqual(
+        config.get_soft_device_placement(),
+        context.context().soft_device_placement)
 
     # Since soft placement is enabled, the mod operation should work with CPU
     mod()
@@ -192,18 +208,9 @@ class ConfigTest(test.TestCase):
     with self.assertRaises(errors.InvalidArgumentError):
       mod()
 
-    config.set_soft_device_placement(True)
-    self.assertEqual(config.get_soft_device_placement(), True)
-    self.assertEqual(
-        config.get_soft_device_placement(),
-        context.context().soft_device_placement)
-
-    # Since soft placement is re-enabled, the mod operation should work with CPU
-    mod()
-
   @reset_eager
   def testLogDevicePlacement(self):
-    self.assertEqual(context.get_log_device_placement(), False)
+    self.assertFalse(context.get_log_device_placement())
 
     context.set_log_device_placement(True)
     self.assertEqual(context.get_log_device_placement(), True)
@@ -217,11 +224,137 @@ class ConfigTest(test.TestCase):
         context.get_log_device_placement(),
         context.context().log_device_placement)
 
-    constant_op.constant(1)
+    context.ensure_initialized()
+
     with self.assertRaises(RuntimeError):
       context.set_log_device_placement(True)
     with self.assertRaises(RuntimeError):
       context.set_log_device_placement(False)
+
+  @test_util.run_gpu_only
+  @reset_eager
+  def testJit(self):
+    self.assertEqual(config.get_optimizer_jit(), False)
+
+    # the following function should cause Op fusion to occur. However, there is
+    # unfortunately no straightforward way to ensure this. We will just have to
+    # settle for creating a test that can trigger JIT.
+    @def_function.function
+    def fun(a, b):
+      c = a * b
+      d = c + a
+      return d
+
+    a = constant_op.constant([2., 2.])
+    b = constant_op.constant([2., 2.])
+
+    self.evaluate(fun(a, b))
+
+    config.set_optimizer_jit(True)
+    self.assertEqual(config.get_optimizer_jit(), True)
+    self.assertEqual(config.get_optimizer_jit(),
+                     context.context().optimizer_jit)
+
+    self.evaluate(fun(a, b))
+
+    config.set_optimizer_jit(False)
+    self.assertEqual(config.get_optimizer_jit(), False)
+    self.assertEqual(config.get_optimizer_jit(),
+                     context.context().optimizer_jit)
+
+    self.evaluate(fun(a, b))
+
+  @parameterized.named_parameters(
+      ('LayoutOptimizer', 'layout_optimizer'),
+      ('ConstantFolding', 'constant_folding'),
+      ('ShapeOptimization', 'shape_optimization'),
+      ('Remapping', 'remapping'),
+      ('ArithmeticOptimization', 'arithmetic_optimization'),
+      ('DependencyOptimization', 'dependency_optimization'),
+      ('LoopOptimization', 'loop_optimization'),
+      ('FunctionOptimization', 'function_optimization'),
+      ('DebugStripper', 'debug_stripper'),
+      ('ScopedAllocatorOptimization', 'scoped_allocator_optimization'),
+      ('ImplementationSelector', 'implementation_selector'))
+  @reset_eager
+  def testOptimizerToggleOption(self, field):
+    # TODO(b/128531235): Improve testing of option
+    options = config.get_optimizer_experimental_options()
+    self.assertIsNone(options.get(field))
+
+    config.set_optimizer_experimental_options({field: True})
+    options[field] = True
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+    config.set_optimizer_experimental_options({field: False})
+    options[field] = False
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+  @parameterized.named_parameters(
+      ('DisableModelPruning', 'disable_model_pruning'),
+      ('DisableMetaOptimizer', 'disable_meta_optimizer'))
+  @reset_eager
+  def testOptimizerBoolOption(self, field):
+    # TODO(b/128531235): Improve testing of option
+    options = config.get_optimizer_experimental_options()
+    self.assertFalse(options.get(field))
+
+    config.set_optimizer_experimental_options({field: True})
+    options[field] = True
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+    config.set_optimizer_experimental_options({field: False})
+    options[field] = False
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+  @test_util.run_gpu_only
+  @reset_eager
+  def testOptimizerToggleOptionPinToHost(self):
+    options = config.get_optimizer_experimental_options()
+    self.assertIsNone(options.get('pin_to_host_optimization'))
+
+    @def_function.function
+    def fun():
+      op = test_ops.device_placement_op()
+      return op
+
+    # Force optimizer to run for all graphs
+    config.set_optimizer_experimental_options({'min_graph_nodes': -1})
+    options['min_graph_nodes'] = -1
+
+    # Since pin to host is disabled, the operation should go on GPU
+    gpu = self.evaluate(fun())
+    self.assertIn(compat.as_bytes('GPU'), gpu)
+
+    config.set_optimizer_experimental_options(
+        {'pin_to_host_optimization': True})
+    options['pin_to_host_optimization'] = True
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+    # Since pin to host is enabled, the operation should go on CPU
+    cpu = self.evaluate(fun())
+    self.assertIn(compat.as_bytes('CPU'), cpu)
+
+    config.set_optimizer_experimental_options(
+        {'pin_to_host_optimization': False})
+    options['pin_to_host_optimization'] = False
+    self.assertDictEqual(config.get_optimizer_experimental_options(), options)
+    self.assertDictEqual(
+        context.context().get_optimizer_experimental_options(), options)
+
+    # Since pin to host is disabled again, the operation should go on GPU
+    gpu2 = self.evaluate(fun())
+    self.assertIn(compat.as_bytes('GPU'), gpu2)
 
 
 if __name__ == '__main__':

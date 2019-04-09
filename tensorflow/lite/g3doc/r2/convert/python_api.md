@@ -1,7 +1,7 @@
 # Converter Python API guide
 
 This page provides examples on how to use the
-[TensorFlow Lite Converter](index.md) using the Python API in TensorFlow 2.0.
+[TensorFlow Lite converter](index.md) using the Python API in TensorFlow 2.0.
 
 [TOC]
 
@@ -10,6 +10,7 @@ This page provides examples on how to use the
 The Python API for converting TensorFlow models to TensorFlow Lite in TensorFlow
 2.0 is
 [`tf.lite.TFLiteConverter.from_concrete_function()`](https://www.tensorflow.org/versions/r2.0/api_docs/python/tf/lite/TFLiteConverter).
+Documentation on concrete functions is available [here](concrete_function.md).
 
 This document contains [example usages](#examples) of the API, a detailed list
 of [changes in the API between 1.X and 2.0](#differences), and
@@ -45,9 +46,6 @@ tflite_model = converter.convert()
 The following example shows how to convert a SavedModel into a TensorFlow Lite
 `FlatBuffer`.
 
-Note: Due to a known issue with preserving input shapes with SavedModels,
-`set_shape` needs to be called for all input tensors.
-
 ```python
 import tensorflow as tf
 
@@ -67,9 +65,6 @@ tf.saved_model.save(root, export_dir, to_save)
 model = tf.saved_model.load(export_dir)
 concrete_func = model.signatures[
   tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY]
-
-# Set the shape manually.
-concrete_func.inputs[0].set_shape(input_data.shape)
 
 # Convert the model.
 converter = tf.lite.TFLiteConverter.from_concrete_function(concrete_func)
@@ -94,8 +89,8 @@ model.compile(optimizer='sgd', loss='mean_squared_error')
 model.fit(x, y, epochs=50)
 
 # Get the concrete function from the Keras model.
-to_save = tf.function(lambda x : model(x))
-concrete_func = to_save.get_concrete_function(
+run_model = tf.function(lambda x : model(x))
+concrete_func = run_model.get_concrete_function(
     tf.TensorSpec([None, 1], tf.float32))
 
 # Convert the model.
@@ -106,8 +101,9 @@ tflite_model = converter.convert()
 ### End-to-end MobileNet conversion <a name="mobilenet"></a>
 
 The following example shows how to convert and run inference on a pre-trained
-`tf.Keras` MobileNet model to TensorFlow Lite. In order to load the model from
-file, use `model_path` instead of `model_content`.
+`tf.Keras` MobileNet model to TensorFlow Lite. It compares the results of the
+TensorFlow and TensorFlow Lite model on random data. In order to load the model
+from file, use `model_path` instead of `model_content`.
 
 ```python
 import numpy as np
@@ -117,15 +113,10 @@ import tensorflow as tf
 model = tf.keras.applications.MobileNetV2(
     weights="imagenet", input_shape=(224, 224, 3))
 
-# Save and load the model to generate the concrete function to export.
-export_dir = "/tmp/test_model/mobilenet"
-tf.saved_model.save(model, export_dir)
-model = tf.saved_model.load(export_dir)
-concrete_func = model.signatures[
-  tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY]
-
-# Set the shape manually.
-concrete_func.inputs[0].set_shape([1, 224, 224, 3])
+# Create a concrete function to export.
+to_save = tf.function(lambda x: model(x))
+concrete_func = to_save.get_concrete_function(
+    tf.TensorSpec([1, 224, 224, 3], tf.float32))
 
 # Convert the model.
 converter = tf.lite.TFLiteConverter.from_concrete_function(concrete_func)
@@ -139,17 +130,36 @@ interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Test model on random input data.
+# Test the TensorFlow Lite model on random input data.
 input_shape = input_details[0]['shape']
 input_data = np.array(np.random.random_sample(input_shape), dtype=np.float32)
 interpreter.set_tensor(input_details[0]['index'], input_data)
 
 interpreter.invoke()
-output_data = interpreter.get_tensor(output_details[0]['index'])
-print(output_data)
+tflite_results = interpreter.get_tensor(output_details[0]['index'])
+
+# Test the TensorFlow model on random input data.
+tf_results = concrete_func(tf.constant(input_data))
+
+# Compare the result.
+for tf_result, tflite_result in zip(tf_results, tflite_results):
+  np.testing.assert_almost_equal(tf_result, tflite_result, decimal=5)
 ```
 
-## Summary of changes in TFLiteConverter in 1.X and 2.0 <a name="differences"></a>
+## Summary of changes in `TFLiteConverter` between 1.X and 2.0 <a name="differences"></a>
+
+The following section summarizes the changes in `TFLiteConverter` from 1.X to
+2.0. If any of the changes raise concerns, please file a
+[GitHub issue](https://github.com/tensorflow/tensorflow/issues).
+
+### Supported formats
+
+`TFLiteConverter` in 2.0 supports SavedModels and Keras model files generated in
+both 1.X and 2.0. However, the conversion process no longer supports frozen
+`GraphDefs` generated in 1.X. Users who want to convert frozen `GraphDefs` to
+TensorFlow Lite should use `tf.compat.v1.TFLiteConverter`.
+
+### Quantization-aware training
 
 The following attributes and methods associated with
 [quantization-aware training](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/contrib/quantize)
@@ -170,7 +180,9 @@ API is being reworked and streamlined in a direction that supports
 quantization-aware training through the Keras API. These attributes will be
 removed in the 2.0 API until the new quantization API is launched. Users who
 want to convert models generated by the rewriter function can use
-`tensorflow.compat.v1`.
+`tf.compat.v1.TFLiteConverter`.
+
+### Changes to attributes
 
 The `target_ops` attribute has become an attribute of `TargetSpec` and renamed
 to `supported_ops` in line with future additions to the optimization framework.
@@ -189,14 +201,13 @@ Additionally, the following attributes have been removed:
     *   `dump_graphviz_dir`
     *   `dump_graphviz_video`
 
+### Deprecated APIs
+
 The following methods that were previously deprecated in 1.X will no longer be
 exported in 2.0:
 
 *   `lite.toco_convert`
 *   `lite.TocoConverter`
-
-If any of the changes raise concerns, please file a
-[GitHub issue](https://github.com/tensorflow/tensorflow/issues).
 
 ## Installing TensorFlow <a name="versioning"></a>
 
@@ -217,15 +228,6 @@ code snippet.
 import tensorflow.compat.v2 as tf
 
 tf.enable_v2_behavior()
-```
-
-### Using TensorFlow 1.X from a 2.0 installation <a name="use-1.X-from-2.0"></a>
-
-TensorFlow 1.X can be enabled from 2.0 installation. This can be useful if you
-are using features that are no longer supported in 2.0.
-
-```python
-import tensorflow.compat.v1 as tf
 ```
 
 ### Build from source code <a name="latest_package"></a>

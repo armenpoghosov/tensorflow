@@ -88,6 +88,8 @@ class InputLayer(base_layer.Layer):
 
     if isinstance(input_shape, tensor_shape.TensorShape):
       input_shape = tuple(input_shape.as_list())
+    elif isinstance(input_shape, int):
+      input_shape = (input_shape,)
 
     if input_tensor is None:
       if input_shape is not None:
@@ -118,7 +120,7 @@ class InputLayer(base_layer.Layer):
                          'InputLayer, you should instantiate your model and '
                          'directly call it on your input.')
       self.is_placeholder = False
-      self._batch_input_shape = tuple(input_tensor.get_shape().as_list())
+      self._batch_input_shape = tuple(input_tensor.shape.as_list())
 
     # Create an input node to add to self.outbound_node
     # and set output_tensors' _keras_history.
