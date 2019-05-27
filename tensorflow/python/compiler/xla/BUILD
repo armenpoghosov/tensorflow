@@ -40,6 +40,7 @@ cuda_py_test(
         "//tensorflow/python:variable_scope",
         "//tensorflow/python:variables",
     ],
+    xla_enable_strict_auto_jit = True,
     xla_enabled = True,
 )
 
@@ -60,6 +61,7 @@ py_library(
         "//tensorflow/python:variable_scope",
         "//tensorflow/python/distribute:summary_op_util",
         "//tensorflow/python/eager:context",
+        "//tensorflow/python/eager:def_function",
     ],
 )
 
@@ -85,5 +87,6 @@ cuda_py_test(
         "no_mac",
         "no_windows",
     ],
+    xla_enable_strict_auto_jit = True,
     xla_enabled = True,
 )

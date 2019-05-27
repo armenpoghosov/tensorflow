@@ -2,9 +2,8 @@
 
 package(
     default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],  # Apache 2.0
 )
-
-licenses(["notice"])  # Apache 2.0
 
 load("//tensorflow:tensorflow.bzl", "tf_py_test")
 load("//tensorflow:tensorflow.bzl", "cuda_py_test")
@@ -155,7 +154,8 @@ cuda_py_test(
     xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+# TODO(b/130359919): Reenable test when it becomes stable
+tf_py_test(
     name = "random_binomial_test",
     size = "medium",
     srcs = ["random_binomial_test.py"],
@@ -169,7 +169,7 @@ cuda_py_test(
         "//tensorflow/python:platform",
         "//tensorflow/python:stateful_random_ops",
     ],
-    xla_enable_strict_auto_jit = True,
+    tags = ["no_oss"],
 )
 
 cuda_py_test(
@@ -186,4 +186,5 @@ cuda_py_test(
         "//tensorflow/python:platform",
         "//tensorflow/python:random_ops",
     ],
+    xla_enable_strict_auto_jit = True,
 )

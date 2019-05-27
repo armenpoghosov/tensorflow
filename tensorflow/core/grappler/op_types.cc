@@ -47,6 +47,12 @@ bool IsAnyDiv(const NodeDef& node) {
          node.op() == "FloorDiv" || node.op() == "TruncateDiv";
 }
 
+bool IsAnyMatMul(const NodeDef& node) {
+  const auto& op = node.op();
+  return op == "MatMul" || op == "BatchMatMul" || op == "SparseMatMul" ||
+         IsQuantizedMatMul(node);
+}
+
 bool IsAnyMax(const NodeDef& node) {
   const auto& op = node.op();
   return op == "Max" || op == "SegmentMax" || op == "UnsortedSegmentMax";
@@ -211,6 +217,8 @@ bool IsElementWiseMonotonic(const NodeDef& node, bool* is_non_decreasing) {
   return false;
 }
 
+bool IsElu(const NodeDef& node) { return node.op() == "Elu"; }
+
 bool IsEluGrad(const NodeDef& node) { return node.op() == "EluGrad"; }
 
 bool IsEnter(const NodeDef& node) {
@@ -237,12 +245,14 @@ bool IsFloorMod(const NodeDef& node) { return node.op() == "FloorMod"; }
 
 bool IsFusedBatchNorm(const NodeDef& node) {
   const auto& op = node.op();
-  return op == "FusedBatchNorm" || op == "FusedBatchNormV2";
+  return op == "FusedBatchNorm" || op == "FusedBatchNormV2" ||
+         op == "FusedBatchNormV3";
 }
 
 bool IsFusedBatchNormGrad(const NodeDef& node) {
   const auto& op = node.op();
-  return op == "FusedBatchNormGrad" || op == "FusedBatchNormGradV2";
+  return op == "FusedBatchNormGrad" || op == "FusedBatchNormGradV2" ||
+         op == "FusedBatchNormGradV3";
 }
 
 bool IsGreater(const NodeDef& node) { return node.op() == "Greater"; }
@@ -299,11 +309,7 @@ bool IsLogicalNot(const NodeDef& node) { return node.op() == "LogicalNot"; }
 
 bool IsLogicalOr(const NodeDef& node) { return node.op() == "LogicalOr"; }
 
-bool IsMatMul(const NodeDef& node) {
-  const auto& op = node.op();
-  return op == "MatMul" || op == "BatchMatMul" || op == "SparseMatMul" ||
-         IsQuantizedMatMul(node);
-}
+bool IsMatMul(const NodeDef& node) { return node.op() == "MatMul"; }
 
 bool IsMax(const NodeDef& node) { return node.op() == "Max"; }
 
@@ -411,6 +417,8 @@ bool IsReduction(const NodeDef& node) {
 }
 
 bool IsRelu(const NodeDef& node) { return node.op() == "Relu"; }
+
+bool IsRelu6(const NodeDef& node) { return node.op() == "Relu6"; }
 
 bool IsReluGrad(const NodeDef& node) { return node.op() == "ReluGrad"; }
 
@@ -681,7 +689,7 @@ bool ModifiesInputsInPlace(const NodeDef& node) {
   }
 
   std::transform(op_name.begin(), op_name.end(), op_name.begin(), ::tolower);
-  if (str_util::StrContains(op_name, "inplace")) {
+  if (absl::StrContains(op_name, "inplace")) {
     return true;
   }
   return GetBoolAttr(node, "in_place") || GetBoolAttr(node, "inplace");
@@ -936,8 +944,8 @@ bool NeverForwardsInputs(const NodeDef& node) {
                                 "RandomPoissonV2"}));
   const string& op_name = node.op();
   return kNonForwardingOps->count(op_name) > 0 ||
-         str_util::StrContains(op_name, "Segment") ||
-         str_util::StartsWith(op_name, "Quantize");
+         absl::StrContains(op_name, "Segment") ||
+         absl::StartsWith(op_name, "Quantize");
 }
 
 }  // namespace grappler

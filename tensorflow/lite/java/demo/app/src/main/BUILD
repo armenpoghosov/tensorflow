@@ -1,8 +1,9 @@
 load("@build_bazel_rules_android//android:rules.bzl", "android_binary")
 
-package(default_visibility = ["//visibility:private"])
-
-licenses(["notice"])  # Apache 2.0
+package(
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],  # Apache 2.0
+)
 
 android_binary(
     name = "TfLiteCameraDemo",
@@ -25,6 +26,7 @@ android_binary(
     # use the target in that case.
     tags = ["manual"],
     deps = [
+        "//tensorflow/lite/java:tensorflowlite",
         "//tensorflow/lite/java:tensorflowlite_gpu",
         "//tensorflow/lite/java/src/testhelper/java/org/tensorflow/lite:testhelper",
         "@androidsdk//com.android.support:support-v13-25.2.0",
