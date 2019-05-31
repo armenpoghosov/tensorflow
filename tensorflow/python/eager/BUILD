@@ -658,7 +658,7 @@ py_library(
     ],
 )
 
-tf_py_test(
+cuda_py_test(
     name = "remote_test",
     size = "medium",
     srcs = ["remote_test.py"],
@@ -669,6 +669,7 @@ tf_py_test(
         ":remote",
         "//tensorflow/python:resource_variable_ops",
     ],
+    grpc_enabled = True,
     tags = [
         "no_oss",  # This test launches local server.
         "optonly",  # times out
