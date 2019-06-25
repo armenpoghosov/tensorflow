@@ -402,9 +402,7 @@ XlaOp Lgamma(XlaOp input) {
 
     // lgamma(+/-inf) = +inf.
     XlaOp inf_bcast = FullLike(input, std::numeric_limits<float>::infinity());
-    return Select(Or(IsFinite(input),                           // is finite, or
-                     Not(Or(Lt(input, one), Ge(input, one)))),  // is nan
-                  result, inf_bcast);
+    return Select(IsInf(input), inf_bcast, result);
   };
 
   auto& b = *input.builder();
@@ -425,10 +423,7 @@ XlaOp Lgamma(XlaOp input) {
 // A(z) = kBaseLanczosCoeff + sigma(k = 1, n, kLanczosCoefficients[i] / (z + k))
 // A'(z) = sigma(k = 1, n, kLanczosCoefficients[i] / (z + k) / (z + k))
 XlaOp Digamma(XlaOp input) {
-  auto& b = *input.builder();
-  return b.ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
-    TF_RETURN_IF_ERROR(EnsureOperandIsRealFp("Digamma", input));
-
+  auto do_it = [](XlaOp input) {
     XlaOp zero = ScalarLike(input, 0);
     XlaOp one_half = ScalarLike(input, 0.5);
     XlaOp one = ScalarLike(input, 1);
@@ -466,8 +461,28 @@ XlaOp Digamma(XlaOp input) {
                   Log1p(z / lanczos_gamma_plus_one_half);
 
     XlaOp y = log_t + num / denom - lanczos_gamma / t;
-    XlaOp reflection = y - pi * Cos(pi * input) / Sin(pi * input);
-    return Select(need_to_reflect, reflection, y);
+
+    // We need to be careful how we compute cot(pi * input) below: For
+    // near-integral values of `input`, pi * input can lose precision.
+    //
+    // Input is already known to be less than 0.5 (otherwise we don't have to
+    // reflect).  We shift values smaller than -0.5 into the range [-.5, .5] to
+    // increase precision of pi * input and the resulting cotangent.
+    XlaOp reduced_input = input + Abs(Floor(input + ScalarLike(input, 0.5)));
+    XlaOp reflection =
+        y - pi * Cos(pi * reduced_input) / Sin(pi * reduced_input);
+    XlaOp real_result = Select(need_to_reflect, reflection, y);
+
+    // Digamma has poles at negative integers and zero; return nan for those.
+    return Select(And(Le(input, zero), Eq(input, Floor(input))),
+                  FullLike(input, std::numeric_limits<float>::quiet_NaN()),
+                  real_result);
+  };
+
+  auto& b = *input.builder();
+  return b.ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
+    TF_RETURN_IF_ERROR(EnsureOperandIsRealFp("Digamma", input));
+    return DoWithUpcastToF32(input, {BF16, F16}, do_it);
   });
 }
 
@@ -513,28 +528,149 @@ XlaOp Asin(XlaOp x) {
 
 XlaOp Atan(XlaOp x) { return Atan2(x, ScalarLike(x, 1.0)); }
 
-XlaOp Tan(XlaOp x) { return Sin(x) / Cos(x); }
+XlaOp Tan(XlaOp x) {
+  return DoWithUpcastToF32(x, {F16}, [](XlaOp x) { return Sin(x) / Cos(x); });
+}
 
 // Hyperbolic trigonometric functions.
 
-// acosh(x) = log(x + sqrt(x^2 - 1))
+// acosh(x) = log(x + sqrt(x^2 - 1))      if x >= -1
 //          = log(x + sqrt((x+1)*(x-1)))
+// acosh(x) = nan                         if x < -1
+//
+// If x^2 will overflow, we approximate sqrt(x^2 - 1) == x and compute as
+// log(2*x) = log(2) + log(x).  (Note this works because negative x never
+// overflows; x < -1 simply yields nan.  This is quite different than asinh!)
 XlaOp Acosh(XlaOp x) {
-  return Log(x + Sqrt((x + ScalarLike(x, 1.0)) * (x - ScalarLike(x, 1.0))));
+  XlaBuilder* b = x.builder();
+  return b->ReportErrorOrReturn([&]() -> StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(auto shape, b->GetShape(x));
+
+    auto one = ScalarLike(x, 1);
+    auto neg_one = ScalarLike(x, -1);
+    auto nan = FullLike(x, std::numeric_limits<float>::quiet_NaN());
+
+    // return
+    //
+    //   nan                        if x < -1
+    //   log(x) + log(2)            if x >= sqrt_max_value
+    //   log(x + sqrt((x+1)*(x-1))) otherwise
+    //
+    // TODO(jlebar): For now, we ignore the question of overflow if x is a
+    // complex type, because we don't yet have exhaustive tests for complex trig
+    // functions.
+    auto naive_result = Log(x + Sqrt((x + one) * (x - one)));
+    if (primitive_util::IsComplexType(shape.element_type())) {
+      return naive_result;
+    }
+    auto overflow_result = Log(x) + Log(ScalarLike(x, 2));
+
+    auto sqrt_max_value = Sqrt(MaxFiniteValue(b, shape.element_type()));
+    return Select(Lt(x, neg_one), nan,
+                  Select(Ge(x, sqrt_max_value), overflow_result, naive_result));
+  });
 }
 
 // asinh(x) = log(x + sqrt(x^2 + 1))
-XlaOp Asinh(XlaOp x) { return Log(x + Sqrt(x * x + ScalarLike(x, 1.0))); }
+//
+// If x^2 will overflow and x is positive, we can approximate x + sqrt(x^2 + 1)
+// as 2*x and return log(2) + log(x).
+//
+// If x is negative, the above would give us some trouble; we can't approximate
+// the result as x + abs(x) = 0!  But we're saved by the fact that asinh(-x) =
+// -asinh(x).
+XlaOp Asinh(XlaOp x) {
+  XlaBuilder* b = x.builder();
+  auto do_it = [&](XlaOp x) -> StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(auto shape, b->GetShape(x));
+    auto one = ScalarLike(x, 1);
 
-// atanh(x) = 0.5 * log((1 + x) / (1 - x))
-XlaOp Atanh(XlaOp x) {
-  return Log((ScalarLike(x, 1.0) + x) / (ScalarLike(x, 1.0) - x)) *
-         ScalarLike(x, 0.5);
+    // Let a = abs(x).  Compute
+    //
+    //   y = log(a + sqrt(a*a + 1))  if a < sqrt_max_value, or
+    //   y = log(a) + log(2)         otherwise
+    //
+    // and then return
+    //
+    //   y * sign(x).
+    //
+    // TODO(jlebar): For now, we ignore the question of overflow if x is a
+    // complex type, because we don't yet have exhaustive tests for complex trig
+    // functions.
+    if (primitive_util::IsComplexType(shape.element_type())) {
+      return Log(x + Sqrt(x * x + one));
+    }
+    auto a = Abs(x);
+    auto naive_result = Log(a + Sqrt(a * a + one));
+    auto overflow_result = Log(Abs(a)) + Log(ScalarLike(a, 2));
+    auto sqrt_max_value = Sqrt(MaxFiniteValue(b, shape.element_type()));
+    return Sign(x) *
+           Select(Ge(a, sqrt_max_value), overflow_result, naive_result);
+  };
+  // These upcasts are not strictly necessary on all platforms to get within our
+  // error tolerances, so we could relax this if it ever mattered.
+  return DoWithUpcastToF32(x, {BF16, F16}, [&](XlaOp x) {
+    return b->ReportErrorOrReturn(do_it(x));
+  });
 }
 
-XlaOp Cosh(XlaOp x) { return (Exp(x) + Exp(-x)) * ScalarLike(x, 0.5); }
+// atanh(x) = 0.5 * log((1 + x) / (1 - x)) if abs(x) <= 1
+// atanh(x) = nan                          otherwise
+XlaOp Atanh(XlaOp x) {
+  XlaBuilder* b = x.builder();
+  auto do_it = [&](XlaOp x) -> StatusOr<XlaOp> {
+    TF_ASSIGN_OR_RETURN(auto shape, b->GetShape(x));
+    auto naive_result =
+        Log((ScalarLike(x, 1.0) + x) / (ScalarLike(x, 1.0) - x)) *
+        ScalarLike(x, 0.5);
 
-XlaOp Sinh(XlaOp x) { return (Exp(x) - Exp(-x)) * ScalarLike(x, 0.5); }
+    // TODO(jlebar): For now, we ignore the nan edge case for complex inputs,
+    // because we don't yet have exhaustive tests for complex trig functions.
+    if (primitive_util::IsComplexType(shape.element_type())) {
+      return naive_result;
+    }
+
+    auto nan = FullLike(x, std::numeric_limits<float>::quiet_NaN());
+    return Select(Gt(Abs(x), ScalarLike(x, 1)), nan, naive_result);
+  };
+  return DoWithUpcastToF32(x, {BF16}, [&](XlaOp x) {  //
+    return b->ReportErrorOrReturn(do_it(x));
+  });
+}
+
+// Cosh(x) = (e^x + e^-x) / 2
+//         = e^(x + log(1/2)) + e^(-x + log(1/2)).
+//
+// The second formulation avoids overflowing when e^x = inf but (e^x)/2 is not
+// inf.
+//
+// This incorrectly overflows to inf for two f32 input values, namely
+// +/-89.4159851, due to rounding error when computing x +/- log(1/2).  The
+// correct answer of 3.40281961e+38 (0x7f7fffec) is very close to max-float, so
+// we deem this acceptable.
+XlaOp Cosh(XlaOp x) {
+  return DoWithUpcastToF32(x, {BF16, F16}, [](XlaOp x) {
+    auto log_one_half = Log(ScalarLike(x, 0.5));
+    return Exp(x + log_one_half) + Exp(-x + log_one_half);
+  });
+}
+
+// Sinh(x) = (e^x - e^-x) / 2
+//         = e^(x + log(1/2)) - e^(-x + log(1/2)).
+//
+// The second formulation avoids overflowing when e^x = inf but (e^x)/2 is not
+// inf.
+//
+// This incorrectly overflows to +/-inf for two f32 input values, namely
+// +/-89.4159851, due to rounding error when computing x +/- log(1/2).  The
+// correct answer of 3.40281961e+38 (0x7f7fffec) is very close to max-float, so
+// we deem this acceptable.
+XlaOp Sinh(XlaOp x) {
+  return DoWithUpcastToF32(x, {BF16, F16}, [](XlaOp x) {
+    auto log_one_half = Log(ScalarLike(x, 0.5));
+    return Exp(x + log_one_half) - Exp(-x + log_one_half);
+  });
+}
 
 XlaOp MaybeConjugate(XlaOp x, bool conjugate) {
   XlaBuilder* builder = x.builder();
@@ -622,6 +758,11 @@ XlaOp NextAfter(XlaOp from, XlaOp to) {
     // Cast back to the original type.
     return BitcastConvertType(result, shape.element_type());
   });
+}
+
+XlaOp Logistic(XlaOp x) {
+  auto half = xla::ScalarLike(x, 0.5);
+  return half + half * xla::Tanh(half * x);
 }
 
 }  // namespace xla

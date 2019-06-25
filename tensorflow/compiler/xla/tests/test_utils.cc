@@ -112,6 +112,31 @@ void PopulateWithFloatingPointData(Literal* literal, std::minstd_rand0* engine,
   }
 }
 
+template <typename ComplexT>
+void PopulateWithComplexData(Literal* result, std::minstd_rand0* engine,
+                             bool no_duplicates) {
+  using InnerFloatT = typename ComplexT::value_type;
+  CHECK(engine != nullptr);
+  CHECK_EQ(result->shape().element_type(),
+           primitive_util::NativeToPrimitiveType<ComplexT>());
+  Shape floating_point_shape = ShapeUtil::ChangeElementType(
+      result->shape(), primitive_util::NativeToPrimitiveType<InnerFloatT>());
+  Literal real_lit(floating_point_shape);
+  Literal imaginary_lit(floating_point_shape);
+
+  PopulateWithFloatingPointData<InnerFloatT>(&real_lit, engine, no_duplicates);
+  PopulateWithFloatingPointData<InnerFloatT>(&imaginary_lit, engine,
+                                             no_duplicates);
+
+  absl::Span<const InnerFloatT> real_data = real_lit.data<InnerFloatT>();
+  absl::Span<const InnerFloatT> imaginary_data =
+      imaginary_lit.data<InnerFloatT>();
+  absl::Span<ComplexT> result_data = result->data<ComplexT>();
+  for (int i = 0; i < real_lit.data<InnerFloatT>().size(); i++) {
+    result_data[i] = ComplexT(real_data[i], imaginary_data[i]);
+  }
+}
+
 template <>
 void PopulateWithFloatingPointData<half>(Literal* literal,
                                          std::minstd_rand0* engine,
@@ -182,7 +207,12 @@ StatusOr<Literal> MakeFakeLiteralInternal(const Shape& shape,
   if (engine == nullptr) {
     return Literal::CreateFromShape(shape);
   }
-  Literal literal(shape);
+  // Clear tiles/element size in shape's layout before using it for creating
+  // literal.
+  Shape new_shape = shape;
+  new_shape.mutable_layout()->clear_tiles();
+  new_shape.mutable_layout()->set_element_size_in_bits(0);
+  Literal literal(new_shape);
   switch (shape.element_type()) {
     case BF16:
       PopulateWithFloatingPointData<bfloat16>(&literal, engine, no_duplicates);
@@ -219,6 +249,12 @@ StatusOr<Literal> MakeFakeLiteralInternal(const Shape& shape,
       break;
     case U64:
       PopulateWithRandomIntegralData<uint64>(&literal, engine, no_duplicates);
+      break;
+    case C64:
+      PopulateWithComplexData<complex64>(&literal, engine, no_duplicates);
+      break;
+    case C128:
+      PopulateWithComplexData<complex128>(&literal, engine, no_duplicates);
       break;
     case PRED: {
       std::uniform_int_distribution<int> generator(0, 1);
@@ -269,7 +305,12 @@ StatusOr<Literal> MakeFakeLiteralInternalWithBounds(const Shape& shape,
   if (engine == nullptr) {
     return Literal::CreateFromShape(shape);
   }
-  Literal literal(shape);
+  // Clear tiles/element size in shape's layout before using it for creating
+  // literal.
+  Shape new_shape = shape;
+  new_shape.mutable_layout()->clear_tiles();
+  new_shape.mutable_layout()->set_element_size_in_bits(0);
+  Literal literal(new_shape);
   switch (shape.element_type()) {
     case S8:
       PopulateWithRandomIntegralDataWithBounds<int8>(
@@ -544,13 +585,14 @@ Status VerifyHloModule(HloModule* const module, bool layout_sensitive,
 std::unique_ptr<HloDotInstruction> CreateCanonicalDot(const Shape& shape,
                                                       HloInstruction* lhs,
                                                       HloInstruction* rhs) {
-  CHECK_EQ(lhs->shape().rank(), 2);
-  CHECK_EQ(rhs->shape().rank(), 2);
+  CHECK_LE(lhs->shape().rank(), 2);
+  CHECK_LE(rhs->shape().rank(), 2);
   PrecisionConfig precision_config;
   precision_config.mutable_operand_precision()->Resize(
       2, PrecisionConfig::DEFAULT);
   DotDimensionNumbers dot_dimension_numbers;
-  dot_dimension_numbers.add_lhs_contracting_dimensions(1);
+  dot_dimension_numbers.add_lhs_contracting_dimensions(
+      lhs->shape().rank() > 1 ? 1 : 0);
   dot_dimension_numbers.add_rhs_contracting_dimensions(0);
   return absl::make_unique<HloDotInstruction>(
       shape, lhs, rhs, dot_dimension_numbers, precision_config);

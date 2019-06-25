@@ -25,8 +25,8 @@ limitations under the License.
 #if GOOGLE_CUDA
 #if GOOGLE_TENSORRT
 
-#include "cuda/include/cuda_runtime_api.h"
-#include "tensorrt/include/NvInfer.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#include "third_party/tensorrt/NvInfer.h"
 
 namespace tensorflow {
 namespace tensorrt {
@@ -57,6 +57,8 @@ struct TRTInt8Calibrator : public nvinfer1::IInt8EntropyCalibrator {
   bool getBatch(void* bindings[], const char* names[],
                 int num_bindings) override;
 
+  // Feed calibration data to the calibrator, and return true if the data is
+  // accepted. Return false if the calibrator has been terminated.
   bool setBatch(const std::unordered_map<string, void*>& data,
                 const cudaStream_t stream);
 
@@ -78,10 +80,10 @@ struct TRTInt8Calibrator : public nvinfer1::IInt8EntropyCalibrator {
   const int batch_size_;
 
   // mutex for condition_variable
-  tensorflow::mutex cond_mtx_;
+  mutex cond_mtx_;
 
   // condition variable to implement producer-consumer queue for calibration
-  tensorflow::condition_variable cond_;
+  condition_variable cond_;
 
   // Is calibration finished?
   bool done_;
