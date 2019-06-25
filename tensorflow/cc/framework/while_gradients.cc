@@ -21,24 +21,28 @@ limitations under the License.
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/cc/ops/while_loop.h"
 
-namespace tensorflow {
-namespace {
+namespace tensorflow
+{
+namespace
+{
 
 using ops::BodyGraphBuilderFn;
 using ops::BuildWhileLoop;
 using ops::CondGraphBuilderFn;
 
-Output ToOutput(OutputTensor output_tensor) {
-  return Output(const_cast<Node*>(output_tensor.node), output_tensor.index);
+Output ToOutput(OutputTensor output_tensor)
+{
+    return Output(const_cast<Node*>(output_tensor.node), output_tensor.index);
 }
 
-std::vector<Output> ToOutputVector(
-    const std::vector<OutputTensor>& output_tensors) {
-  size_t n = output_tensors.size();
-  std::vector<Output> result;
-  result.reserve(n);
-  for (int i = 0; i < n; ++i) result.push_back(ToOutput(output_tensors[i]));
-  return result;
+std::vector<Output> ToOutputVector(const std::vector<OutputTensor>& output_tensors)
+{
+    size_t n = output_tensors.size();
+    std::vector<Output> result;
+    result.reserve(n);
+    for (int i = 0; i < n; ++i)
+        result.push_back(ToOutput(output_tensors[i]));
+    return result;
 }
 
 // The backprop loop counter and main backprop loop run in their own execution
@@ -47,46 +51,47 @@ std::vector<Output> ToOutputVector(
 // together in a different frame). This returns the frame name to use for the
 // backprop while loops.
 // TODO(skyewm): make sure this is unique among existing frame names
-string BackPropFrameName(const string& forward_frame_name) {
-  return strings::StrCat(forward_frame_name, "_backprop");
+string BackPropFrameName(const string& forward_frame_name)
+{
+    return strings::StrCat(forward_frame_name, "_backprop");
 }
 
 // Creates a loop that counts the number of iterations performed by the
 // while loop associated with `while_ctx`. The returned output yields the
 // iteration count.
-Status AddForwardLoopCounter(WhileContext* while_ctx, const Scope& scope,
-                             Output* count) {
-  // Create while loop:
-  //   i = 0
-  //   while forward loop predicate is true:
-  //     ++i
+Status AddForwardLoopCounter(WhileContext* while_ctx, const Scope& scope, Output* count)
+{
+    // Create while loop:
+    //   i = 0
+    //   while forward loop predicate is true:
+    //     ++i
 
-  Output zero = ops::Const(scope, 0, {});
+    Output zero = ops::Const(scope, 0, {});
 
-  // Condition function that returns condition output from original while loop.
-  CondGraphBuilderFn cond_fn = [while_ctx](const Scope& scope,
-                                           const std::vector<Output>& inputs,
-                                           Output* output) {
-    *output = ToOutput(while_ctx->cond_output());
+    // Condition function that returns condition output from original while loop.
+    CondGraphBuilderFn cond_fn = [while_ctx] (const Scope& scope,
+        const std::vector<Output>& inputs, Output* output)
+    {
+        *output = ToOutput(while_ctx->cond_output());
+        return Status::OK();
+    };
+
+    // Body function that adds one to input.
+    BodyGraphBuilderFn body_fn = [] (const Scope& scope,
+        const std::vector<Output>& inputs, std::vector<Output>* outputs)
+    {
+        DCHECK_EQ(inputs.size(), 1);
+        outputs->emplace_back(ops::Add(scope, inputs[0], 1));
+        return scope.status();
+    };
+
+    // Note that this loop runs in the same execution frame as the forward loop.
+    std::vector<Output> outputs;
+    TF_RETURN_IF_ERROR(BuildWhileLoop(scope, {zero},
+        cond_fn, body_fn, while_ctx->frame_name(), &outputs,
+        /* create_while_ctx */ false));
+    *count = outputs[0];
     return Status::OK();
-  };
-
-  // Body function that adds one to input.
-  BodyGraphBuilderFn body_fn = [](const Scope& scope,
-                                  const std::vector<Output>& inputs,
-                                  std::vector<Output>* outputs) {
-    DCHECK_EQ(inputs.size(), 1);
-    outputs->emplace_back(ops::Add(scope, inputs[0], 1));
-    return scope.status();
-  };
-
-  // Note that this loop runs in the same execution frame as the forward loop.
-  std::vector<Output> outputs;
-  TF_RETURN_IF_ERROR(BuildWhileLoop(scope, {zero}, cond_fn, body_fn,
-                                    while_ctx->frame_name(), &outputs,
-                                    /* create_while_ctx */ false));
-  *count = outputs[0];
-  return Status::OK();
 }
 
 // Creates a loop that executes `loop_count` times. The returned output is the
@@ -176,11 +181,11 @@ Status AddWhileGradientLoop(WhileContext* while_ctx,
 
 }  // namespace
 
-Status AddWhileLoopGradient(WhileContext* while_ctx, const Scope& scope,
-                            const std::vector<Output>& grad_inputs,
-                            std::vector<Output>* grad_outputs) {
-  Output forward_loop_count;
-  TF_RETURN_IF_ERROR(AddForwardLoopCounter(
+Status AddWhileLoopGradient(WhileContext* while_ctx, Scope const& scope,
+    std::vector<Output> const& grad_inputs, std::vector<Output>* grad_outputs)
+{
+    Output forward_loop_count;
+    TF_RETURN_IF_ERROR(AddForwardLoopCounter(
       while_ctx, scope.NewSubScope("ForwardLoopCounter"), &forward_loop_count));
 
   // TODO(skyewm): can we combine the backprop loop counter and main gradient
