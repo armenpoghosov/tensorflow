@@ -4271,7 +4271,8 @@ class TotalVariationTest(test_util.TensorFlowTestCase):
 
     return a
 
-  def testTotalVariationNumpy(self):
+  # TODO(b/133851381): re-enable this test.
+  def disabledtestTotalVariationNumpy(self):
     """Test the TensorFlow implementation against a numpy implementation.
     The two implementations are very similar so it is possible that both
     have the same bug, which would not be detected by this test. It is
@@ -5069,7 +5070,7 @@ class ImageGradientsTest(test_util.TensorFlowTestCase):
 
 class SobelEdgesTest(test_util.TensorFlowTestCase):
 
-  def testSobelEdges1x2x3x1(self):
+  def disabled_testSobelEdges1x2x3x1(self):
     img = constant_op.constant([[1, 3, 6], [4, 1, 5]],
                                dtype=dtypes.float32, shape=[1, 2, 3, 1])
     expected = np.reshape([[[0, 0], [0, 12], [0, 0]],

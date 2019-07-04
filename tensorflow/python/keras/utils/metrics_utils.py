@@ -29,13 +29,13 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.keras.utils import tf_utils
 from tensorflow.python.keras.utils.generic_utils import to_list
-from tensorflow.python.keras.utils.losses_utils import squeeze_or_expand_dimensions
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.ops import weights_broadcast_ops
+from tensorflow.python.ops.losses import util as tf_losses_utils
 from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.ops.ragged import ragged_util
 from tensorflow.python.util import tf_decorator
@@ -99,10 +99,11 @@ def result_wrapper(result_fn):
     `merge_call()`.
   """
 
-  def decorated(_, *args):
+  def decorated(metric_obj, *args):
     """Decorated function with merge_call."""
+    has_strategy = distribution_strategy_context.has_strategy()
     replica_context = distribution_strategy_context.get_replica_context()
-    if replica_context is None:  # if in cross replica context already
+    if not has_strategy or replica_context is None:
       result_t = array_ops.identity(result_fn(*args))
     else:
       # TODO(psv): Test distribution of metrics using different distribution
@@ -114,18 +115,22 @@ def result_wrapper(result_fn):
       def merge_fn_wrapper(distribution, merge_fn, *args):
         # We will get `PerReplica` merge function. Taking the first one as all
         # are identical copies of the function that we had passed below.
-        merged_result_fn = (
-            distribution.experimental_local_results(merge_fn)[0](*args))
+        result = distribution.experimental_local_results(merge_fn)[0](*args)
 
         # Wrapping result in identity so that control dependency between
         # update_op from `update_state` and result works in case result returns
         # a tensor.
-        return array_ops.identity(merged_result_fn)
+        return array_ops.identity(result)
 
       # Wrapping result in merge_call. merge_call is used when we want to leave
       # replica mode and compute a value in cross replica mode.
       result_t = replica_context.merge_call(
           merge_fn_wrapper, args=(result_fn,) + args)
+
+    # We are saving the result op here to be used in train/test execution
+    # functions. This basically gives the result op that was generated with a
+    # control dep to the updates for these workflows.
+    metric_obj._call_result = result_t
     return result_t
 
   return tf_decorator.make_decorator(result_fn, decorated)
@@ -299,10 +304,12 @@ def update_confusion_matrix_variables(variables_to_update,
           message='predictions must be <= 1')
   ]):
     if sample_weight is None:
-      y_pred, y_true = squeeze_or_expand_dimensions(y_pred, y_true)
+      y_pred, y_true = tf_losses_utils.squeeze_or_expand_dimensions(
+          y_pred, y_true)
     else:
-      y_pred, y_true, sample_weight = squeeze_or_expand_dimensions(
-          y_pred, y_true, sample_weight=sample_weight)
+      y_pred, y_true, sample_weight = (
+          tf_losses_utils.squeeze_or_expand_dimensions(
+              y_pred, y_true, sample_weight=sample_weight))
 
   if top_k is not None:
     y_pred = _filter_top_k(y_pred, top_k)

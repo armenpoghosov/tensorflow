@@ -1,10 +1,9 @@
+load("//tensorflow:tensorflow.bzl", "py_test", "tf_py_test")
+
 package(
     default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],  # Apache 2.0
 )
-
-licenses(["notice"])  # Apache 2.0
-
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
 
 py_library(
     name = "feature_column_py",
@@ -46,7 +45,7 @@ py_library(
         "//tensorflow/python:util",
         "//tensorflow/python:variable_scope",
         "//tensorflow/python:variables",
-        "//tensorflow/python/keras",
+        "//tensorflow/python/keras:engine",
         "@six_archive//:six",
     ],
 )
@@ -84,7 +83,9 @@ py_library(
         "//tensorflow/python:util",
         "//tensorflow/python:variable_scope",
         "//tensorflow/python:variables",
-        "//tensorflow/python/keras",
+        "//tensorflow/python/keras:engine",
+        "//tensorflow/python/keras:generic_utils",
+        "//tensorflow/python/keras:layers_base",
         "//third_party/py/numpy",
         "@six_archive//:six",
     ],
@@ -231,5 +232,16 @@ py_test(
         "//tensorflow/python:training",
         "//tensorflow/python:util",
         "//tensorflow/python/keras:layers",
+    ],
+)
+
+tf_py_test(
+    name = "serialization_test",
+    srcs = ["serialization_test.py"],
+    additional_deps = [
+        ":feature_column_v2",
+        "@absl_py//absl/testing:parameterized",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:util",
     ],
 )

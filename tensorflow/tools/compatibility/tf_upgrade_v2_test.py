@@ -1646,6 +1646,15 @@ def _log_prob(self, x):
     _, _, errors, _ = self._upgrade("tf.flags.FLAGS")
     self.assertIn("tf.flags has been removed", errors[0])
 
+  def test_contrib_estimator_head_deprecation(self):
+    api_symbols = ["binary_classification_head", "logistic_regression_head",
+                   "multi_class_head", "multi_head", "multi_label_head",
+                   "poisson_regression_head", "regression_head"]
+    for symbol in api_symbols:
+      text = "tf.contrib.estimator." + symbol
+      _, report, _, _ = self._upgrade(text)
+      self.assertIn("`tf.contrib.estimator.*_head` has been deprecated", report)
+
   def test_contrib_layers_layer_norm_deprecation(self):
     _, report, _, _ = self._upgrade("tf.contrib.layers.layer_norm")
     self.assertIn("`tf.contrib.layers.layer_norm` has been deprecated", report)
@@ -2014,6 +2023,22 @@ def _log_prob(self, x):
     _, _, _, new_text = self._upgrade(text)
     self.assertEqual(expected_text, new_text)
 
+  def test_contrib_to_addons_move(self):
+    small_mapping = {
+        "tf.contrib.layers.poincare_normalize":
+            "tfa.layers.PoincareNormalize",
+        "tf.contrib.layers.maxout":
+            "tfa.layers.Maxout",
+        "tf.contrib.layers.group_norm":
+            "tfa.layers.GroupNormalization",
+        "tf.contrib.layers.instance_norm":
+            "tfa.layers.InstanceNormalization",
+    }
+    for symbol, replacement in small_mapping.items():
+      text = "{}('stuff', *args, **kwargs)".format(symbol)
+      _, report, _, _ = self._upgrade(text)
+      self.assertIn(replacement, report)
+
   def testXlaExperimental(self):
     text = "tf.xla.experimental.jit_scope(0)"
     expected_text = "tf.xla.experimental.jit_scope(0)"
@@ -2089,6 +2114,12 @@ def _log_prob(self, x):
         "tf.io.decode_raw(input_bytes=[1,2,3], output_dtype=tf.int32)")
     _, _, _, new_text = self._upgrade(text)
     self.assertEqual(expected_text, new_text)
+
+  def testRecomputeGrad(self):
+    text = "tf.contrib.layers.recompute_grad()"
+    expected = "tf.recompute_grad()"
+    _, _, _, new_text = self._upgrade(text)
+    self.assertEqual(expected, new_text)
 
   def test_load_variable(self):
     text = "tf.contrib.framework.load_variable('a')"
@@ -2192,7 +2223,6 @@ def _log_prob(self, x):
       result_a, result_b = results[0], results[1]
       self.assertEqual(result_a[3], expected_text_a)
       self.assertEqual(result_b[3], expected_text_b)
-
   def test_model_to_estimator_checkpoint_warning(self):
     text = "tf.keras.estimator.model_to_estimator(model)"
     _, report, _, _ = self._upgrade(text)
