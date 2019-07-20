@@ -110,7 +110,12 @@ Status ConvertAttribute(const mlir::StringAttr& attr, AttrValue* value) {
   return Status::OK();
 }
 
-Status ConvertAttribute(const mlir::FunctionAttr& attr, AttrValue* value) {
+Status ConvertAttribute(const mlir::UnitAttr& attr, AttrValue* value) {
+  value->clear_value();
+  return Status::OK();
+}
+
+Status ConvertAttribute(const mlir::SymbolRefAttr& attr, AttrValue* value) {
   value->mutable_func()->set_name(attr.getValue());
   return Status::OK();
 }
@@ -144,7 +149,7 @@ Status ConvertAttribute(const mlir::ArrayAttr& attr, AttrValue* value) {
       TensorProto tensor;
       TF_RETURN_IF_ERROR(ConvertToTensorProto(attr, &tensor));
       *list->add_tensor() = tensor;
-    } else if (auto attr = a.dyn_cast<mlir::FunctionAttr>()) {
+    } else if (auto attr = a.dyn_cast<mlir::SymbolRefAttr>()) {
       AttrValue attrVal;
       TF_RETURN_IF_ERROR(ConvertAttribute(attr, &attrVal));
       *list->add_func() = attrVal.func();
@@ -213,8 +218,8 @@ Status ConvertAttributes(const llvm::ArrayRef<mlir::NamedAttribute> attrs,
     }
     AttrValue value;
     switch (attr.getKind()) {
-      case mlir::StandardAttributes::Function: {
-        auto func_attr = attr.cast<mlir::FunctionAttr>();
+      case mlir::StandardAttributes::SymbolRef: {
+        auto func_attr = attr.cast<mlir::SymbolRefAttr>();
         value.mutable_func()->set_name(func_attr.getValue());
         func_call_attrs[string(name)] = value;
         continue;
@@ -243,6 +248,10 @@ Status ConvertAttributes(const llvm::ArrayRef<mlir::NamedAttribute> attrs,
       case mlir::StandardAttributes::OpaqueElements:
         TF_RETURN_IF_ERROR(
             ConvertAttribute(attr.cast<mlir::ElementsAttr>(), &value));
+        break;
+      case mlir::StandardAttributes::Unit:
+        TF_RETURN_IF_ERROR(
+            ConvertAttribute(attr.cast<mlir::UnitAttr>(), &value));
         break;
       // AffineMap and Type kinds are not implemented.
       default:

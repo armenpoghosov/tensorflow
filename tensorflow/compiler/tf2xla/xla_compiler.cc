@@ -85,8 +85,7 @@ ComputeArgAndRetvalCores(const Graph& graph) {
         auto sharding,
         ParseShardingFromDevice(*n, std::numeric_limits<int32>::max()));
     if (sharding.has_value()) {
-      TF_RET_CHECK(sharding.value().type() ==
-                   xla::OpSharding::Type::OpSharding_Type_MAXIMAL);
+      TF_RET_CHECK(sharding.value().type() == xla::OpSharding::MAXIMAL);
       return sharding.value().tile_assignment_devices(0);
     } else {
       return -1;
@@ -832,7 +831,7 @@ Status XlaCompiler::BuildArguments(
     xla::XlaOp tuple;
     if (is_entry_computation) {
       xla::OpSharding tuple_sharding;
-      tuple_sharding.set_type(xla::OpSharding::Type::OpSharding_Type_TUPLE);
+      tuple_sharding.set_type(xla::OpSharding::TUPLE);
       for (int64 parameter : *input_to_args) {
         auto it = arg_cores.find(parameter);
         const int core = it == arg_cores.end() ? 0 : it->second;
@@ -1047,6 +1046,10 @@ Status GetPotentialFunctionName(const Node& node, const string** name) {
 Status ValidateGraph(const Graph* graph,
                      const FunctionLibraryDefinition& flib_def,
                      const DeviceType& device_type, const string& name) {
+  // Make sure the XLA compilation kernels are registered.  This operation is
+  // idempotent so it is fine if someone called it already.
+  XlaOpRegistry::RegisterCompilationKernels();
+
   auto maybe_error = [&](const Node* node, const Status& s) -> Status {
     if (!s.ok()) {
       return errors::InvalidArgument(absl::StrCat(
