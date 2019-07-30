@@ -227,6 +227,7 @@ cc_library(
         # gemmlowp_context_ and ruy_context_ members.
         "//tensorflow/lite/experimental/ruy:context",
         "@gemmlowp",
+        "//tensorflow/lite:external_cpu_backend_context",
     ],
 )
 
@@ -304,23 +305,6 @@ cc_test(
         # ruy's reference path provides the reference implementation
         # that this test compares against.
         "//tensorflow/lite/experimental/ruy",
-    ],
-)
-
-cc_library(
-    name = "cpu_backend_support",
-    srcs = [
-        "cpu_backend_support.cc",
-    ],
-    hdrs = [
-        "cpu_backend_support.h",
-    ],
-    copts = tflite_copts(),
-    deps = [
-        ":cpu_backend_context",
-        ":op_macros",
-        "//tensorflow/lite/c:c_api_internal",
-        "@gemmlowp",
     ],
 )
 
@@ -482,7 +466,7 @@ cc_library(
     visibility = ["//visibility:private"],
     deps = [
         ":activation_functor",
-        ":cpu_backend_support",
+        ":cpu_backend_context",
         ":eigen_support",
         ":kernel_util",
         ":lstm_eval",
@@ -506,6 +490,36 @@ cc_library(
         "//third_party/eigen3",
         "@farmhash_archive//:farmhash",
         "@flatbuffers",
+    ],
+)
+
+cc_library(
+    name = "variable_op_kernels",
+    srcs = [
+        "assign_variable.cc",
+        "read_variable.cc",
+    ],
+    deps = [
+        ":kernel_util",
+        ":op_macros",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/kernels/internal:tensor",
+    ],
+)
+
+cc_test(
+    name = "variable_ops_test",
+    size = "small",
+    srcs = [
+        "variable_ops_test.cc",
+    ],
+    deps = [
+        ":test_main",
+        ":test_util",
+        ":variable_op_kernels",
+        "//tensorflow/lite:framework",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -724,6 +738,7 @@ cc_test(
     name = "batch_to_space_nd_test",
     size = "small",
     srcs = ["batch_to_space_nd_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -751,6 +766,7 @@ cc_test(
     name = "concatenation_test",
     size = "small",
     srcs = ["concatenation_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -887,6 +903,7 @@ cc_test(
     name = "elementwise_test",
     size = "small",
     srcs = ["elementwise_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -955,6 +972,7 @@ cc_test(
     name = "exp_test",
     size = "small",
     srcs = ["exp_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -995,6 +1013,7 @@ cc_test(
     name = "reduce_test",
     size = "small",
     srcs = ["reduce_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1022,6 +1041,7 @@ cc_test(
     name = "pad_test",
     size = "small",
     srcs = ["pad_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1107,6 +1127,7 @@ cc_test(
     name = "resize_nearest_neighbor_test",
     size = "small",
     srcs = ["resize_nearest_neighbor_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1120,6 +1141,7 @@ cc_test(
     name = "svdf_test",
     size = "small",
     srcs = ["svdf_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1133,6 +1155,7 @@ cc_test(
     name = "embedding_lookup_test",
     size = "small",
     srcs = ["embedding_lookup_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1147,6 +1170,7 @@ cc_test(
     name = "embedding_lookup_sparse_test",
     size = "small",
     srcs = ["embedding_lookup_sparse_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1190,6 +1214,7 @@ cc_test(
     name = "pooling_test",
     size = "small",
     srcs = ["pooling_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1247,6 +1272,7 @@ cc_test(
     name = "hashtable_lookup_test",
     size = "small",
     srcs = ["hashtable_lookup_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1329,6 +1355,7 @@ cc_test(
     name = "squeeze_test",
     size = "small",
     srcs = ["squeeze_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1342,6 +1369,7 @@ cc_test(
     name = "strided_slice_test",
     size = "small",
     srcs = ["strided_slice_test.cc"],
+    tags = ["tflite_nnapi"],
     deps = [
         ":builtin_ops",
         ":test_main",
@@ -1844,6 +1872,21 @@ cc_test(
     srcs = ["matrix_set_diag_test.cc"],
     deps = [
         ":builtin_ops",
+        ":test_main",
+        ":test_util",
+        "//tensorflow/lite:framework",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
+    name = "quant_basic_lstm_test",
+    size = "small",
+    srcs = ["quant_basic_lstm_test.cc"],
+    tags = ["tflite_nnapi"],
+    deps = [
+        ":builtin_ops",
+        ":kernel_util",
         ":test_main",
         ":test_util",
         "//tensorflow/lite:framework",
