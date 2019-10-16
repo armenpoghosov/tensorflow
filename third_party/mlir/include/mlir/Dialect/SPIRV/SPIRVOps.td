@@ -35,11 +35,37 @@
 include "mlir/Dialect/SPIRV/SPIRVBase.td"
 #endif // SPIRV_BASE
 
+#ifdef SPIRV_ARITHMETIC_OPS
+#else
+include "mlir/Dialect/SPIRV/SPIRVArithmeticOps.td"
+#endif // SPIRV_ARITHMETIC_OPS
+
+#ifdef SPIRV_BIT_OPS
+#else
+include "mlir/Dialect/SPIRV/SPIRVBitOps.td"
+#endif // SPIRV_BIT_OPS
+
+#ifdef SPIRV_CONTROLFLOW_OPS
+#else
+include "mlir/Dialect/SPIRV/SPIRVControlFlowOps.td"
+#endif // SPIRV_CONTROLFLOW_OPS
+
+#ifdef SPIRV_LOGICAL_OPS
+#else
+include "mlir/Dialect/SPIRV/SPIRVLogicalOps.td"
+#endif // SPIRV_LOGICAL_OPS
+
 #ifdef SPIRV_STRUCTURE_OPS
 #else
 // Pull in ops for defining the SPIR-V module structure
 include "mlir/Dialect/SPIRV/SPIRVStructureOps.td"
 #endif // SPIRV_STRUCTURE_OPS
+
+#ifdef SPIRV_GLSL_OPS
+#else
+// Pull in ops for extended instruction set for GLSL
+include "mlir/Dialect/SPIRV/SPIRVGLSLOps.td"
+#endif // SPIRV_GLSL_OPS
 
 // -----
 
@@ -66,8 +92,11 @@ def SPV_AccessChainOp : SPV_Op<"AccessChain", [NoSideEffect]> {
     no remaining (unused) indexes.
 
      Each index in Indexes
+
     - must be a scalar integer type,
+
     - is treated as a signed count, and
+
     - must be an OpConstant when indexing into a structure.
 
     ### Custom assembly form
@@ -94,6 +123,61 @@ def SPV_AccessChainOp : SPV_Op<"AccessChain", [NoSideEffect]> {
 
   let results = (outs
     SPV_AnyPtr:$component_ptr
+  );
+
+  let builders = [OpBuilder<[{Builder *builder, OperationState &state,
+                              Value *basePtr, ArrayRef<Value *> indices}]>];
+}
+
+// -----
+
+def SPV_BitcastOp : SPV_Op<"Bitcast", [NoSideEffect]> {
+  let summary = "Bit pattern-preserving type conversion.";
+
+  let description = [{
+    Result Type must be an OpTypePointer, or a scalar or vector of
+    numerical-type.
+
+    Operand must have a type of OpTypePointer, or a scalar or vector of
+    numerical-type. It must be a different type than Result Type.
+
+    If either Result Type or Operand is a pointer, the other must be a
+    pointer (diverges from the SPIR-V spec).
+
+    If Result Type has a different number of components than Operand, the
+    total number of bits in Result Type must equal the total number of bits
+    in Operand. Let L be the type, either Result Type or Operand’s type,
+    that has the larger number of components. Let S be the other type, with
+    the smaller number of components. The number of components in L must be
+    an integer multiple of the number of components in S. The first
+    component (that is, the only or lowest-numbered component) of S maps to
+    the first components of L, and so on,  up to the last component of S
+    mapping to the last components of L. Within this mapping, any single
+    component of S (mapping to multiple components of L) maps its lower-
+    ordered bits to the lower-numbered components of L.
+
+    ### Custom assembly form
+
+    ``` {.ebnf}
+    bitcast-op ::= ssa-id `=` `spv.Bitcast` ssa-use
+                   `from` operand-type `to` result-type
+    ```
+
+    For example:
+
+    ```
+    %1 = spv.Bitcast %0 from f32 to i32
+    %1 = spv.Bitcast %0 from vector<2xf32> to i64
+    %1 = spv.Bitcast %0 from !spv.ptr<f32 to Function> to !spv.ptr<i32, Function>
+    ```
+  }];
+
+  let arguments = (ins
+    SPV_ScalarOrVectorOrPtr:$operand
+  );
+
+  let results = (outs
+    SPV_ScalarOrVectorOrPtr:$result
   );
 }
 
@@ -139,72 +223,79 @@ def SPV_CompositeExtractOp : SPV_Op<"CompositeExtract", [NoSideEffect]> {
   let results = (outs
     SPV_Type:$component
   );
+
+  let hasFolder = 1;
 }
 
 // -----
 
-def SPV_EntryPointOp : SPV_Op<"EntryPoint", [ModuleOnly]> {
+def SPV_ControlBarrierOp : SPV_Op<"ControlBarrier", []> {
   let summary = [{
-    Declare an entry point, its execution model, and its interface.
+    Wait for other invocations of this module to reach the current point of
+    execution.
   }];
 
   let description = [{
-    Execution Model is the execution model for the entry point and its
-    static call tree. See Execution Model.
+    All invocations of this module within Execution scope must reach this
+    point of execution before any invocation will proceed beyond it.
 
-    Entry Point must be the Result <id> of an OpFunction instruction.
+    When Execution is Workgroup or larger, behavior is undefined if this
+    instruction is used in control flow that is non-uniform within
+    Execution. When Execution is Subgroup or Invocation, the behavior of
+    this instruction in non-uniform control flow is defined by the client
+    API.
 
-    Name is a name string for the entry point. A module cannot have two
-    OpEntryPoint instructions with the same Execution Model and the same
-    Name string.
+    If Semantics is not None, this instruction also serves as an
+    OpMemoryBarrier instruction, and must also perform and adhere to the
+    description and semantics of an OpMemoryBarrier instruction with the
+    same Memory and Semantics operands.  This allows atomically specifying
+    both a control barrier and a memory barrier (that is, without needing
+    two instructions). If Semantics is None, Memory is ignored.
 
-    Interface is a list of <id> of global OpVariable instructions. These
-    declare the set of global variables from a module that form the
-    interface of this entry point. The set of Interface <id> must be equal
-    to or a superset of the global OpVariable Result <id> referenced by the
-    entry point’s static call tree, within the interface’s storage classes.
-    Before version 1.4, the interface’s storage classes are limited to the
-    Input and Output storage classes. Starting with version 1.4, the
-    interface’s storage classes are all storage classes used in declaring
-    all global variables referenced by the entry point’s call tree.
+    Before version 1.3, it is only valid to use this instruction with
+    TessellationControl, GLCompute, or Kernel execution models. There is no
+    such restriction starting with version 1.3.
 
-    Interface <id> are forward references. Before version 1.4, duplication
-    of these <id> is tolerated. Starting with version 1.4, an <id> must not
-    appear more than once.
+    When used with the TessellationControl execution model, it also
+    implicitly synchronizes the Output Storage Class:  Writes to Output
+    variables performed by any invocation executed prior to a
+    OpControlBarrier will be visible to any other invocation after return
+    from that OpControlBarrier.
 
     ### Custom assembly form
 
     ``` {.ebnf}
-    execution-model ::= "Vertex" | "TesellationControl" |
-                        <and other SPIR-V execution models...>
+    scope ::= `"CrossDevice"` | `"Device"` | `"Workgroup"` | ...
 
-    entry-point-op ::= ssa-id ` = spv.EntryPoint ` execution-model fn-name
-                       (ssa-use ( `, ` ssa-use)* ` : `
-                        pointer-type ( `, ` pointer-type)* )?
+    memory-semantics ::= `"None"` | `"Acquire"` | "Release"` | ...
+
+    control-barrier-op ::= `spv.ControlBarrier` scope, scope, memory-semantics
     ```
 
     For example:
 
     ```
-    spv.EntryPoint "GLCompute" @foo
-    spv.EntryPoint "Kernel" @foo, %1, %2 : !spv.ptr<f32, Input>, !spv.ptr<f32, Output>
+    spv.ControlBarrier "Workgroup", "Device", "Acquire|UniformMemory"
 
     ```
   }];
 
   let arguments = (ins
-    SPV_ExecutionModelAttr:$execution_model,
-    SymbolRefAttr:$fn,
-    Variadic<SPV_AnyPtr>:$interface
+    SPV_ScopeAttr:$execution_scope,
+    SPV_ScopeAttr:$memory_scope,
+    SPV_MemorySemanticsAttr:$memory_semantics
   );
 
   let results = (outs);
+
+  let verifier = [{ return verifyMemorySemantics(*this); }];
+
   let autogenSerialization = 0;
 }
 
 // -----
 
-def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [ModuleOnly]> {
+def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [InModuleScope]> {
   let summary = "Declare an execution mode for an entry point.";
 
   let description = [{
@@ -238,7 +329,7 @@ def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [ModuleOnly]> {
   let arguments = (ins
     SymbolRefAttr:$fn,
     SPV_ExecutionModeAttr:$execution_mode,
-    OptionalAttr<I32ArrayAttr>:$values
+    I32ArrayAttr:$values
   );
 
   let results = (outs);
@@ -246,52 +337,11 @@ def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [ModuleOnly]> {
   let verifier = [{ return success(); }];
 
   let autogenSerialization = 0;
-}
 
-// -----
-
-def SPV_FMulOp : SPV_Op<"FMul", [NoSideEffect, SameOperandsAndResultType]> {
-  let summary = "Floating-point multiplication of Operand 1 and Operand 2.";
-
-  let description = [{
-    Result Type must be a scalar or vector of floating-point type.
-
-     The types of Operand 1 and Operand 2 both must be the same as Result
-    Type.
-
-     Results are computed per component.
-
-    ### Custom assembly form
-
-    ``` {.ebnf}
-    float-scalar-vector-type ::= float-type |
-                                 `vector<` integer-literal `x` float-type `>`
-    execution-mode-op ::= `spv.FMul` ssa-use, ssa-use
-                          `:` float-scalar-vector-type
-    ```
-
-    For example:
-
-    ```
-    spv.FMul %0, %1 : f32
-    spv.FMul %2, %3 : vector<4xf32>
-    ```
-  }];
-
-  let arguments = (ins
-    SPV_ScalarOrVectorOf<SPV_Float>:$operand1,
-    SPV_ScalarOrVectorOf<SPV_Float>:$operand2
-  );
-
-  let results = (outs
-    SPV_ScalarOrVectorOf<AnyFloat>:$result
-  );
-
-  let parser = [{ return impl::parseBinaryOp(parser, result); }];
-  let printer = [{ return impl::printBinaryOp(getOperation(), p); }];
-
-  // No additional verification needed in addition to the ODS-generated ones.
-  let verifier = [{ return success(); }];
+  let builders = [OpBuilder<[{Builder *builder, OperationState &state,
+                              FuncOp function,
+                              spirv::ExecutionMode executionMode,
+                              ArrayRef<int32_t> params}]>];
 }
 
 // -----
@@ -340,31 +390,60 @@ def SPV_LoadOp : SPV_Op<"Load", []> {
   let results = (outs
     SPV_Type:$value
   );
+
+  let builders = [OpBuilder<[{Builder *builder, OperationState &state,
+                  Value *basePtr, /*optional*/IntegerAttr memory_access,
+                  /*optional*/IntegerAttr alignment}]>];
 }
 
 // -----
 
-def SPV_ReturnOp : SPV_Op<"Return", [Terminator]> {
-  let summary = "Return with no value from a function with void return type.";
+def SPV_MemoryBarrierOp : SPV_Op<"MemoryBarrier", []> {
+  let summary = "Control the order that memory accesses are observed.";
 
   let description = [{
-    This instruction must be the last instruction in a block.
+    Ensures that memory accesses issued before this instruction will be
+    observed before memory accesses issued after this instruction. This
+    control is ensured only for memory accesses issued by this invocation
+    and observed by another invocation executing within Memory scope. If the
+    Vulkan memory model is declared, this ordering only applies to memory
+    accesses that use the NonPrivatePointer memory operand or
+    NonPrivateTexel image operand.
+
+    Semantics declares what kind of memory is being controlled and what kind
+    of control to apply.
+
+    To execute both a memory barrier and a control barrier, see
+    OpControlBarrier.
 
     ### Custom assembly form
 
     ``` {.ebnf}
-    return-op ::= `spv.Return`
+    scope ::= `"CrossDevice"` | `"Device"` | `"Workgroup"` | ...
+
+    memory-semantics ::= `"None"` | `"Acquire"` | `"Release"` | ...
+
+    memory-barrier-op ::= `spv.MemoryBarrier` scope, memory-semantics
+    ```
+
+    For example:
+
+    ```
+    spv.MemoryBarrier "Device", "Acquire|UniformMemory"
+
     ```
   }];
 
-  let arguments = (ins);
+  let arguments = (ins
+    SPV_ScopeAttr:$memory_scope,
+    SPV_MemorySemanticsAttr:$memory_semantics
+  );
 
   let results = (outs);
 
-  let parser = [{ return parseNoIOOp(parser, result); }];
-  let printer = [{ printNoIOOp(getOperation(), p); }];
+  let verifier = [{ return verifyMemorySemantics(*this); }];
 
-  let verifier = [{ return verifyReturn(*this); }];
+  let autogenSerialization = 0;
 }
 
 // -----
@@ -411,6 +490,44 @@ def SPV_StoreOp : SPV_Op<"Store", []> {
 
 // -----
 
+def SPV_UndefOp : SPV_Op<"undef", []> {
+  let summary = "Make an intermediate object whose value is undefined.";
+
+  let description = [{
+    Result Type is the type of object to make.
+
+    Each consumption of Result <id> yields an arbitrary, possibly different
+    bit pattern or abstract value resulting in possibly different concrete,
+    abstract, or opaque values.
+
+    ### Custom assembly form
+
+    ``` {.ebnf}
+    undef-op ::= `spv.undef` `:` sprirv-type
+    ```
+
+    For example:
+
+    ```
+    %0 = spv.undef : f32
+    %1 = spv.undef : !spv.struct<!spv.array<4 x vector<4xi32>>>
+    ```
+  }];
+
+  let arguments = (ins);
+
+  let results = (outs
+    SPV_Type:$result
+  );
+
+  let verifier = [{ return success(); }];
+
+  let hasOpcode = 0;
+  let autogenSerialization = 0;
+}
+
+// -----
+
 def SPV_VariableOp : SPV_Op<"Variable", []> {
   let summary = [{
     Allocate an object in memory, resulting in a pointer to it, which can be
@@ -436,11 +553,13 @@ def SPV_VariableOp : SPV_Op<"Variable", []> {
     ``` {.ebnf}
     variable-op ::= ssa-id `=` `spv.Variable` (`init(` ssa-use `)`)?
                     (`bind(` integer-literal, integer-literal `)`)?
+                    (`built_in(` string-literal `)`)?
                     attribute-dict? `:` spirv-pointer-type
     ```
 
-    where `init` specifies initializer and `bind` specifies the descriptor set
-    and binding number.
+    where `init` specifies initializer and `bind` specifies the
+    descriptor set and binding number. `built_in` specifies SPIR-V
+    BuiltIn decoration associated with the op.
 
     For example:
 
@@ -450,6 +569,7 @@ def SPV_VariableOp : SPV_Op<"Variable", []> {
     %1 = spv.Variable : !spv.ptr<f32, Function>
     %2 = spv.Variable init(%0): !spv.ptr<f32, Private>
     %3 = spv.Variable init(%0) bind(1, 2): !spv.ptr<f32, Uniform>
+    %3 = spv.Variable built_in("GlobalInvocationID") : !spv.ptr<vector<3xi32>, Uniform>
     ```
   }];
 

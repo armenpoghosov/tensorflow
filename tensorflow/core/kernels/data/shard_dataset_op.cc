@@ -79,7 +79,9 @@ class ShardDatasetOp::Dataset : public DatasetBase {
     return n / num_shards_ + (index_ < n % num_shards_ ? 1 : 0);
   }
 
-  bool IsStateful() const override { return input_->IsStateful(); }
+  Status CheckExternalState() const override {
+    return input_->CheckExternalState();
+  }
 
  protected:
   Status AsGraphDefInternal(SerializationContext* ctx,
@@ -106,6 +108,11 @@ class ShardDatasetOp::Dataset : public DatasetBase {
    public:
     explicit Iterator(const Params& params)
         : DatasetIterator<Dataset>(params), next_index_(0) {}
+
+    string BuildTraceMeName() override {
+      return strings::StrCat(prefix(), "#num_shards=", dataset()->num_shards_,
+                             ",index=", dataset()->index_, "#");
+    }
 
     Status Initialize(IteratorContext* ctx) override {
       return dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_);

@@ -20,7 +20,6 @@ from __future__ import division
 from __future__ import print_function
 
 from tensorflow.core.protobuf import config_pb2
-from tensorflow.python.compat import compat as forward_compat
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import context
 from tensorflow.python.eager import def_function
@@ -56,7 +55,8 @@ class CondV2Test(test.TestCase):
     with self.session(graph=ops.get_default_graph()) as sess:
       pred = array_ops.placeholder(dtypes.bool, name="pred")
 
-      expected = control_flow_ops.cond(pred, true_fn, false_fn, name="expected")
+      expected = control_flow_ops.cond(
+          array_ops.squeeze_v2(pred), true_fn, false_fn, name="expected")
       actual = cond_v2.cond_v2(pred, true_fn, false_fn, name="actual")
 
       expected_grad = gradients_impl.gradients(expected, train_vals)
@@ -69,7 +69,21 @@ class CondV2Test(test.TestCase):
       self.assertEqual(expected_val, actual_val)
       self.assertEqual(expected_grad_val, actual_grad_val)
 
+      sess_run_args = {pred: [[True]]}
+      sess_run_args.update(feed_dict)
+      expected_val, actual_val, expected_grad_val, actual_grad_val = sess.run(
+          (expected, actual, expected_grad, actual_grad), sess_run_args)
+      self.assertEqual(expected_val, actual_val)
+      self.assertEqual(expected_grad_val, actual_grad_val)
+
       sess_run_args = {pred: False}
+      sess_run_args.update(feed_dict)
+      expected_val, actual_val, expected_grad_val, actual_grad_val = sess.run(
+          (expected, actual, expected_grad, actual_grad), sess_run_args)
+      self.assertEqual(expected_val, actual_val)
+      self.assertEqual(expected_grad_val, actual_grad_val)
+
+      sess_run_args = {pred: [[False]]}
       sess_run_args.update(feed_dict)
       expected_val, actual_val, expected_grad_val, actual_grad_val = sess.run(
           (expected, actual, expected_grad, actual_grad), sess_run_args)
@@ -908,11 +922,27 @@ class CondV2Test(test.TestCase):
           _has_node_with_op(run_metadata, "Switch"),
           "A `Switch` op exists, but the graph should not be lowered.")
 
-      # Lowering disabled in XLA, there should still be an `If` node
-      self.assertTrue(
-          _has_node_with_op(run_metadata, "StatelessIf"),
-          "An `If` op was not found, but the graph should not be lowered.")
-      # pylint: enable=g-complex-comprehension
+      if test_util.is_xla_enabled():
+        # If XLA is actually enabled then we expect the StatelessIf to have been
+        # put inside an XLA cluster.
+        self.assertFalse(
+            _has_node_with_op(run_metadata, "StatelessIf"),
+            ("A `StatelessIf` op was found, but the node should have been " +
+             "clustered."))
+        self.assertTrue(
+            _has_node_with_op(run_metadata, "_XlaCompile"),
+            ("An `_XlaCompile` op was not found, but the `StatelessIf` (at " +
+             "least) op should have been clustered."))
+        self.assertTrue(
+            _has_node_with_op(run_metadata, "_XlaRun"),
+            ("An `_XlaRun` op was not found, but the `StatelessIf` (at " +
+             "least) op should have been clustered."))
+      else:
+        # Lowering disabled in XLA, there should still be an `If` node
+        self.assertTrue(
+            _has_node_with_op(run_metadata, "StatelessIf"),
+            ("A `StatelessIf` op was not found, but the graph should not be " +
+             "lowered."))
 
   @test_util.run_deprecated_v1
   def testNestedLoweringDisabledInXLA(self):
@@ -1084,21 +1114,46 @@ class CondV2Test(test.TestCase):
   @test_util.run_deprecated_v1
   def testForwardPassRewrite(self):
     x = constant_op.constant(1.0, name="x")
-    output = cond_v2.cond_v2(constant_op.constant(True),
-                             lambda: x * 2.0,
-                             lambda: x)
+    y = constant_op.constant(1.0, name="y")
+
+    def true_fn():
+      y_plus_one = y + 1.
+      return x * y_plus_one
+
+    output = cond_v2.cond_v2(constant_op.constant(True), true_fn, lambda: x)
     if_op = output.op.inputs[0].op
     self.assertEqual(if_op.type, "StatelessIf")
     # pylint: disable=g-deprecated-assert
     self.assertEqual(len(if_op.outputs), 1)
 
     gradients_impl.gradients(output, x)
-    # if_op should have been rewritten to output 2.0 intermediate.
+    # if_op should have been rewritten to output `y_plus_one`.
     self.assertEqual(len(if_op.outputs), 2)
 
     gradients_impl.gradients(output, x)
     # Computing the gradient again shouldn't rewrite if_op again.
     self.assertEqual(len(if_op.outputs), 2)
+    # pylint: enable=g-deprecated-assert
+
+  @test_util.run_deprecated_v1
+  def testDoNotAccumulateConstants(self):
+    x = constant_op.constant(1.0, name="x")
+    output = cond_v2.cond_v2(
+        constant_op.constant(True), lambda: x * 2.0, lambda: x)
+    if_op = output.op.inputs[0].op
+    self.assertEqual(if_op.type, "StatelessIf")
+    # pylint: disable=g-deprecated-assert
+    self.assertEqual(len(if_op.outputs), 1)
+
+    gradients_impl.gradients(output, x)
+    # Number of outputs does change because
+    # 1. `x` is a loop input so does not need to be accumulated.
+    # 2. 2.0 is a constant so it is not accumulated.
+    self.assertEqual(len(if_op.outputs), 1)
+
+    gradients_impl.gradients(output, x)
+    # Computing the gradient again shouldn't rewrite if_op again.
+    self.assertEqual(len(if_op.outputs), 1)
     # pylint: enable=g-deprecated-assert
 
 
@@ -1410,6 +1465,4 @@ def _has_node_with_op(run_metadata, op_type):
 
 
 if __name__ == "__main__":
-  # Forward compat date for StatelessIf.
-  with forward_compat.forward_compatibility_horizon(2019, 7, 23):
-    test.main()
+  test.main()

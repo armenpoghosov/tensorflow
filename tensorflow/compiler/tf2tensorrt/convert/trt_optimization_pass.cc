@@ -67,8 +67,8 @@ Status TRTOptimizationPass::Init(
   if (params.count("use_calibration")) {
     use_calibration_ = params.at("use_calibration").b();
   }
-  if (params.count("use_function_backup")) {
-    use_function_backup_ = params.at("use_function_backup").b();
+  if (params.count("trt_logger")) {
+    trt_logger_name_ = params.at("trt_logger").s();
   }
   return Status::OK();
 }
@@ -248,6 +248,7 @@ Status TRTOptimizationPass::Optimize(grappler::Cluster* cluster,
   }
   cp.input_graph_def = &item.graph;
   cp.output_names = &nodes_to_preserve;
+  cp.trt_logger_name = trt_logger_name_;
   cp.max_batch_size = maximum_batch_size_;
   cp.max_workspace_size_bytes = max_workspace_size_bytes_;
   cp.output_graph_def = optimized_graph;
@@ -258,7 +259,6 @@ Status TRTOptimizationPass::Optimize(grappler::Cluster* cluster,
   cp.is_dyn_op = is_dynamic_op_;
   cp.max_cached_engines = max_cached_batches_;
   cp.use_calibration = use_calibration_;
-  cp.use_function_backup = use_function_backup_;
   auto status = ConvertAfterShapes(cp);
   VLOG(1) << "Returning from " << name_;
   return status;

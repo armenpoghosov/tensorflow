@@ -94,14 +94,14 @@ public:
     SmallVector<Type, 4> argTypes;
   };
 
-  /// This hooks allows for converting a type. This function should return
+  /// This hook allows for converting a type. This function should return
   /// failure if no valid conversion exists, success otherwise. If the new set
   /// of types is empty, the type is removed and any usages of the existing
   /// value are expected to be removed during conversion.
   virtual LogicalResult convertType(Type t, SmallVectorImpl<Type> &results);
 
   /// This hook simplifies defining 1-1 type conversions. This function returns
-  /// the type convert to on success, and a null type on failure.
+  /// the type to convert to on success, and a null type on failure.
   virtual Type convertType(Type t) { return t; }
 
   /// Convert the given set of types, filling 'results' as necessary. This
@@ -244,6 +244,9 @@ public:
   void applySignatureConversion(Region *region,
                                 TypeConverter::SignatureConversion &conversion);
 
+  /// Replace all the uses of the block argument `from` with value `to`.
+  void replaceUsesOfBlockArgument(BlockArgument *from, Value *to);
+
   /// Clone the given operation without cloning its regions.
   Operation *cloneWithoutRegions(Operation *op);
   template <typename OpT> OpT cloneWithoutRegions(OpT op) {
@@ -266,6 +269,15 @@ public:
   void inlineRegionBefore(Region &region, Region &parent,
                           Region::iterator before) override;
   using PatternRewriter::inlineRegionBefore;
+
+  /// PatternRewriter hook for cloning blocks of one region into another. The
+  /// given region to clone *must* not have been modified as part of conversion
+  /// yet, i.e. it must be within an operation that is either in the process of
+  /// conversion, or has not yet been converted.
+  void cloneRegionBefore(Region &region, Region &parent,
+                         Region::iterator before,
+                         BlockAndValueMapping &mapping) override;
+  using PatternRewriter::cloneRegionBefore;
 
   /// PatternRewriter hook for creating a new operation.
   Operation *createOperation(const OperationState &state) override;
@@ -463,30 +475,40 @@ private:
 // Op Conversion Entry Points
 //===----------------------------------------------------------------------===//
 
+/// Below we define several entry points for operation conversion. It is
+/// important to note that the patterns provided to the conversion framework may
+/// have additional constraints. See the `PatternRewriter Hooks` section of the
+/// ConversionPatternRewriter, to see what additional constraints are imposed on
+/// the use of the PatternRewriter.
+
 /// Apply a partial conversion on the given operations, and all nested
 /// operations. This method converts as many operations to the target as
 /// possible, ignoring operations that failed to legalize. This method only
 /// returns failure if there are unreachable blocks in any of the regions nested
 /// within 'ops'. If 'converter' is provided, the signatures of blocks and
 /// regions are also converted.
-LLVM_NODISCARD LogicalResult applyPartialConversion(
-    ArrayRef<Operation *> ops, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, TypeConverter *converter = nullptr);
-LLVM_NODISCARD LogicalResult applyPartialConversion(
-    Operation *op, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, TypeConverter *converter = nullptr);
+LLVM_NODISCARD LogicalResult
+applyPartialConversion(ArrayRef<Operation *> ops, ConversionTarget &target,
+                       const OwningRewritePatternList &patterns,
+                       TypeConverter *converter = nullptr);
+LLVM_NODISCARD LogicalResult
+applyPartialConversion(Operation *op, ConversionTarget &target,
+                       const OwningRewritePatternList &patterns,
+                       TypeConverter *converter = nullptr);
 
 /// Apply a complete conversion on the given operations, and all nested
 /// operations. This method returns failure if the conversion of any operation
 /// fails, or if there are unreachable blocks in any of the regions nested
 /// within 'ops'. If 'converter' is provided, the signatures of blocks and
 /// regions are also converted.
-LLVM_NODISCARD LogicalResult applyFullConversion(
-    ArrayRef<Operation *> ops, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, TypeConverter *converter = nullptr);
-LLVM_NODISCARD LogicalResult applyFullConversion(
-    Operation *op, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, TypeConverter *converter = nullptr);
+LLVM_NODISCARD LogicalResult
+applyFullConversion(ArrayRef<Operation *> ops, ConversionTarget &target,
+                    const OwningRewritePatternList &patterns,
+                    TypeConverter *converter = nullptr);
+LLVM_NODISCARD LogicalResult
+applyFullConversion(Operation *op, ConversionTarget &target,
+                    const OwningRewritePatternList &patterns,
+                    TypeConverter *converter = nullptr);
 
 /// Apply an analysis conversion on the given operations, and all nested
 /// operations. This method analyzes which operations would be successfully
@@ -500,12 +522,12 @@ LLVM_NODISCARD LogicalResult applyFullConversion(
 /// considered for conversion.
 LLVM_NODISCARD LogicalResult applyAnalysisConversion(
     ArrayRef<Operation *> ops, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, DenseSet<Operation *> &convertedOps,
-    TypeConverter *converter = nullptr);
+    const OwningRewritePatternList &patterns,
+    DenseSet<Operation *> &convertedOps, TypeConverter *converter = nullptr);
 LLVM_NODISCARD LogicalResult applyAnalysisConversion(
     Operation *op, ConversionTarget &target,
-    OwningRewritePatternList &&patterns, DenseSet<Operation *> &convertedOps,
-    TypeConverter *converter = nullptr);
+    const OwningRewritePatternList &patterns,
+    DenseSet<Operation *> &convertedOps, TypeConverter *converter = nullptr);
 } // end namespace mlir
 
 #endif // MLIR_TRANSFORMS_DIALECTCONVERSION_H_

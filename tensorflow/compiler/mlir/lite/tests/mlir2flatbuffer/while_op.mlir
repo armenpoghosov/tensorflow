@@ -3,13 +3,16 @@
 // CHECK: {
 // CHECK-NEXT:   version: 3,
 // CHECK-NEXT:   operator_codes: [ {
-// CHECK-NEXT:     builtin_code: WHILE
+// CHECK-NEXT:     builtin_code: WHILE,
+// CHECK-NEXT:     version: 1
 // CHECK-NEXT:   }, {
-// CHECK-NEXT:     builtin_code: GREATER
+// CHECK-NEXT:     builtin_code: GREATER,
+// CHECK-NEXT:     version: 1
 // CHECK-NEXT:   }, {
-// CHECK-NEXT:     builtin_code: SUB
+// CHECK-NEXT:     builtin_code: SUB,
+// CHECK-NEXT:     version: 1
 // CHECK-NEXT:   }, {
-// CHECK-EMPTY:
+// CHECK-NEXT:     version: 1
 // CHECK-NEXT:   } ],
 // CHECK-NEXT:   subgraphs: [ {
 // CHECK-NEXT:     tensors: [ {
@@ -195,7 +198,7 @@ func @main(%arg0: tensor<i32>, %arg1: tensor<1xf32>) -> tensor<1xf32> {
 
   // While %0 is greater than zero, element wise add %1 with itself.
   %2:2 = "tf.While"(%0, %1) {
-    cond = @cond, body = @body
+    cond = @cond, body = @body, is_stateless = false
   } : (tensor<i32>, tensor<1xf32>) -> (tensor<i32>, tensor<1xf32>)
   return %2#1 : tensor<1xf32>
 }

@@ -38,7 +38,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/bit.h"
-#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/SourceMgr.h"
@@ -211,6 +210,14 @@ public:
                                        bool allowDynamic = true);
   ParseResult parseXInDimensionList();
 
+  /// Parse strided layout specification.
+  ParseResult parseStridedLayout(int64_t &offset,
+                                 SmallVectorImpl<int64_t> &strides);
+
+  // Parse a brace-delimiter list of comma-separated integers with `?` as an
+  // unknown marker.
+  ParseResult parseStrideList(SmallVectorImpl<int64_t> &dimensions);
+
   //===--------------------------------------------------------------------===//
   // Attribute Parsing
   //===--------------------------------------------------------------------===//
@@ -227,8 +234,9 @@ public:
   /// Parse a float attribute.
   Attribute parseFloatAttr(Type type, bool isNegative);
 
-  /// Parse an integer attribute.
-  Attribute parseIntegerAttr(Type type, bool isSigned);
+  /// Parse a decimal or a hexadecimal literal, which can be either an integer
+  /// or a float attribute.
+  Attribute parseDecOrHexAttr(Type type, bool isNegative);
 
   /// Parse an opaque elements attribute.
   Attribute parseOpaqueElementsAttr();
@@ -249,6 +257,15 @@ public:
 
   /// Parse a raw location instance.
   ParseResult parseLocationInstance(LocationAttr &loc);
+
+  /// Parse a callsite location instance.
+  ParseResult parseCallSiteLocation(LocationAttr &loc);
+
+  /// Parse a fused location instance.
+  ParseResult parseFusedLocation(LocationAttr &loc);
+
+  /// Parse a name or FileLineCol location instance.
+  ParseResult parseNameOrFileLineColLocation(LocationAttr &loc);
 
   /// Parse an optional trailing location.
   ///
@@ -367,6 +384,12 @@ ParseResult Parser::parsePrettyDialectSymbolName(StringRef &prettyName) {
     case '(':
     case '{':
       nestedPunctuation.push_back(c);
+      continue;
+
+    case '-':
+      // The sequence `->` is treated as special token.
+      if (*curPtr == '>')
+        ++curPtr;
       continue;
 
     case '>':
@@ -604,7 +627,7 @@ Type Parser::parseExtendedType() {
 
 /// Parse a function type.
 ///
-///   function-type ::= type-list-parens `->` type-list
+///   function-type ::= type-list-parens `->` function-result-type
 ///
 Type Parser::parseFunctionType() {
   assert(getToken().is(Token::l_paren));
@@ -618,9 +641,43 @@ Type Parser::parseFunctionType() {
   return builder.getFunctionType(arguments, results);
 }
 
+/// Parse the offset and strides from a strided layout specification.
+///
+///   strided-layout ::= `offset:` dimension `,` `strides: ` stride-list
+///
+ParseResult Parser::parseStridedLayout(int64_t &offset,
+                                       SmallVectorImpl<int64_t> &strides) {
+  // Parse offset.
+  consumeToken(Token::kw_offset);
+  if (!consumeIf(Token::colon))
+    return emitError("expected colon after `offset` keyword");
+  auto maybeOffset = getToken().getUnsignedIntegerValue();
+  bool question = getToken().is(Token::question);
+  if (!maybeOffset && !question)
+    return emitError("invalid offset");
+  offset = maybeOffset ? static_cast<int64_t>(maybeOffset.getValue())
+                       : MemRefType::getDynamicStrideOrOffset();
+  consumeToken();
+
+  if (!consumeIf(Token::comma))
+    return emitError("expected comma after offset value");
+
+  // Parse stride list.
+  if (!consumeIf(Token::kw_strides))
+    return emitError("expected `strides` keyword after offset specification");
+  if (!consumeIf(Token::colon))
+    return emitError("expected colon after `strides` keyword");
+  if (failed(parseStrideList(strides)))
+    return emitError("invalid braces-enclosed stride list");
+  if (llvm::any_of(strides, [](int64_t st) { return st == 0; }))
+    return emitError("invalid memref stride");
+
+  return success();
+}
+
 /// Parse a memref type.
 ///
-///   memref-type ::= `memref` `<` dimension-list-ranked element-type
+///   memref-type ::= `memref` `<` dimension-list-ranked type
 ///                   (`,` semi-affine-map-composition)? (`,` memory-space)? `>`
 ///
 ///   semi-affine-map-composition ::= (semi-affine-map `,` )* semi-affine-map
@@ -659,18 +716,28 @@ Type Parser::parseMemRefType() {
       consumeToken(Token::integer);
       parsedMemorySpace = true;
     } else {
-      // Parse affine map.
       if (parsedMemorySpace)
-        return emitError("affine map after memory space in memref type");
-      auto affineMap = parseAttribute();
-      if (!affineMap)
-        return failure();
-
-      // Verify that the parsed attribute is an affine map.
-      if (auto affineMapAttr = affineMap.dyn_cast<AffineMapAttr>())
-        affineMapComposition.push_back(affineMapAttr.getValue());
-      else
-        return emitError("expected affine map in memref type");
+        return emitError("expected memory space to be last in memref type");
+      if (getToken().is(Token::kw_offset)) {
+        int64_t offset;
+        SmallVector<int64_t, 4> strides;
+        if (failed(parseStridedLayout(offset, strides)))
+          return failure();
+        // Construct strided affine map.
+        auto map = makeStridedLinearLayoutMap(strides, offset,
+                                              elementType.getContext());
+        affineMapComposition.push_back(map);
+      } else {
+        // Parse affine map.
+        auto affineMap = parseAttribute();
+        if (!affineMap)
+          return failure();
+        // Verify that the parsed attribute is an affine map.
+        if (auto affineMapAttr = affineMap.dyn_cast<AffineMapAttr>())
+          affineMapComposition.push_back(affineMapAttr.getValue());
+        else
+          return emitError("expected affine map in memref type");
+      }
     }
     return success();
   };
@@ -764,7 +831,7 @@ Type Parser::parseNonFunctionType() {
 
 /// Parse a tensor type.
 ///
-///   tensor-type ::= `tensor` `<` dimension-list element-type `>`
+///   tensor-type ::= `tensor` `<` dimension-list type `>`
 ///   dimension-list ::= dimension-list-ranked | `*x`
 ///
 Type Parser::parseTensorType() {
@@ -826,8 +893,10 @@ Type Parser::parseTupleType() {
 
 /// Parse a vector type.
 ///
-///   vector-type ::= `vector` `<` static-dimension-list primitive-type `>`
-///   static-dimension-list ::= (decimal-literal `x`)+
+///   vector-type ::= `vector` `<` non-empty-static-dimension-list type `>`
+///   non-empty-static-dimension-list ::= decimal-literal `x`
+///                                       static-dimension-list
+///   static-dimension-list ::= (decimal-literal `x`)*
 ///
 VectorType Parser::parseVectorType() {
   consumeToken(Token::kw_vector);
@@ -858,7 +927,7 @@ VectorType Parser::parseVectorType() {
 ///   dimension-list-ranked ::= (dimension `x`)*
 ///   dimension ::= `?` | decimal-literal
 ///
-/// When `allowDynamic` is not set, this can be also used to parse
+/// When `allowDynamic` is not set, this is used to parse:
 ///
 ///   static-dimension-list ::= (decimal-literal `x`)*
 ParseResult
@@ -917,9 +986,53 @@ ParseResult Parser::parseXInDimensionList() {
   return success();
 }
 
+// Parse a comma-separated list of dimensions, possibly empty:
+//   stride-list ::= `[` (dimension (`,` dimension)*)? `]`
+ParseResult Parser::parseStrideList(SmallVectorImpl<int64_t> &dimensions) {
+  if (!consumeIf(Token::l_square))
+    return failure();
+  // Empty list early exit.
+  if (consumeIf(Token::r_square))
+    return success();
+  while (true) {
+    if (consumeIf(Token::question)) {
+      dimensions.push_back(MemRefType::getDynamicStrideOrOffset());
+    } else {
+      // This must be an integer value.
+      int64_t val;
+      if (getToken().getSpelling().getAsInteger(10, val))
+        return emitError("invalid integer value: ") << getToken().getSpelling();
+      // Make sure it is not the one value for `?`.
+      if (ShapedType::isDynamic(val))
+        return emitError("invalid integer value: ")
+               << getToken().getSpelling()
+               << ", use `?` to specify a dynamic dimension";
+      dimensions.push_back(val);
+      consumeToken(Token::integer);
+    }
+    if (!consumeIf(Token::comma))
+      break;
+  }
+  if (!consumeIf(Token::r_square))
+    return failure();
+  return success();
+}
+
 //===----------------------------------------------------------------------===//
 // Attribute parsing.
 //===----------------------------------------------------------------------===//
+
+/// Return the symbol reference referred to by the given token, that is known to
+/// be an @-identifier.
+static std::string extractSymbolReference(Token tok) {
+  assert(tok.is(Token::at_identifier) && "expected valid @-identifier");
+  StringRef nameStr = tok.getSpelling().drop_front();
+
+  // Check to see if the reference is a string literal, or a bare identifier.
+  if (nameStr.front() == '"')
+    return tok.getStringValue();
+  return nameStr;
+}
 
 /// Parse an arbitrary attribute.
 ///
@@ -998,11 +1111,11 @@ Attribute Parser::parseAttribute(Type type) {
   case Token::floatliteral:
     return parseFloatAttr(type, /*isNegative=*/false);
   case Token::integer:
-    return parseIntegerAttr(type, /*isSigned=*/false);
+    return parseDecOrHexAttr(type, /*isNegative=*/false);
   case Token::minus: {
     consumeToken(Token::minus);
     if (getToken().is(Token::integer))
-      return parseIntegerAttr(type, /*isSigned=*/true);
+      return parseDecOrHexAttr(type, /*isNegative=*/true);
     if (getToken().is(Token::floatliteral))
       return parseFloatAttr(type, /*isNegative=*/true);
 
@@ -1038,9 +1151,9 @@ Attribute Parser::parseAttribute(Type type) {
 
   // Parse a symbol reference attribute.
   case Token::at_identifier: {
-    auto nameStr = getTokenSpelling();
+    std::string nameStr = extractSymbolReference(getToken());
     consumeToken(Token::at_identifier);
-    return builder.getSymbolRefAttr(nameStr.drop_front());
+    return builder.getSymbolRefAttr(nameStr);
   }
 
   // Parse a 'unit' attribute.
@@ -1151,12 +1264,31 @@ Attribute Parser::parseFloatAttr(Type type, bool isNegative) {
   return FloatAttr::get(type, isNegative ? -val.getValue() : val.getValue());
 }
 
-/// Parse an integer attribute.
-Attribute Parser::parseIntegerAttr(Type type, bool isSigned) {
+/// Construct a float attribute bitwise equivalent to the integer literal.
+static FloatAttr buildHexadecimalFloatLiteral(Parser *p, FloatType type,
+                                              uint64_t value) {
+  int width = type.getIntOrFloatBitWidth();
+  APInt apInt(width, value);
+  if (apInt != value) {
+    p->emitError("hexadecimal float constant out of range for type");
+    return nullptr;
+  }
+  APFloat apFloat(type.getFloatSemantics(), apInt);
+  return p->builder.getFloatAttr(type, apFloat);
+}
+
+/// Parse a decimal or a hexadecimal literal, which can be either an integer
+/// or a float attribute.
+Attribute Parser::parseDecOrHexAttr(Type type, bool isNegative) {
   auto val = getToken().getUInt64IntegerValue();
-  if (!val.hasValue() ||
-      (isSigned ? (int64_t)-val.getValue() >= 0 : (int64_t)val.getValue() < 0))
+  if (!val.hasValue())
     return (emitError("integer constant out of range for attribute"), nullptr);
+
+  // Remember if the literal is hexadecimal.
+  StringRef spelling = getToken().getSpelling();
+  auto loc = state.curToken.getLoc();
+  bool isHex = spelling.size() > 1 && spelling[1] == 'x';
+
   consumeToken(Token::integer);
   if (!type) {
     // Default to i64 if not type is specified.
@@ -1165,14 +1297,46 @@ Attribute Parser::parseIntegerAttr(Type type, bool isSigned) {
     else if (!(type = parseType()))
       return nullptr;
   }
-  if (!type.isIntOrIndex())
-    return (emitError("integer value not valid for specified type"), nullptr);
 
+  if (auto floatType = type.dyn_cast<FloatType>()) {
+    // TODO(zinenko): Update once hex format for bfloat16 is supported.
+    if (type.isBF16())
+      return emitError(loc,
+                       "hexadecimal float literal not supported for bfloat16"),
+             nullptr;
+    if (isNegative)
+      return emitError(
+                 loc,
+                 "hexadecimal float literal should not have a leading minus"),
+             nullptr;
+    if (!isHex) {
+      emitError(loc, "unexpected decimal integer literal for a float attribute")
+              .attachNote()
+          << "add a trailing dot to make the literal a float";
+      return nullptr;
+    }
+
+    // Construct a float attribute bitwise equivalent to the integer literal.
+    return buildHexadecimalFloatLiteral(this, floatType, *val);
+  }
+
+  if (!type.isIntOrIndex())
+    return emitError(loc, "integer literal not valid for specified type"),
+           nullptr;
+
+  // Parse the integer literal.
   int width = type.isIndex() ? 64 : type.getIntOrFloatBitWidth();
-  APInt apInt(width, *val, isSigned);
+  APInt apInt(width, *val, isNegative);
   if (apInt != *val)
-    return (emitError("integer constant out of range for attribute"), nullptr);
-  return builder.getIntegerAttr(type, isSigned ? -apInt : apInt);
+    return emitError(loc, "integer constant out of range for attribute"),
+           nullptr;
+
+  // Otherwise construct an integer attribute.
+  if (isNegative ? (int64_t)-val.getValue() >= 0 : (int64_t)val.getValue() < 0)
+    return emitError(loc, "integer constant out of range for attribute"),
+           nullptr;
+
+  return builder.getIntegerAttr(type, isNegative ? -apInt : apInt);
 }
 
 /// Parse an opaque elements attribute.
@@ -1267,14 +1431,6 @@ private:
   /// parseElement([1]) -> Failure
   ParseResult parseElement();
 
-  /// Parse an integer element value, returning failure if the value isn't
-  /// valid.
-  ParseResult parseIntegerElement(bool isSigned);
-
-  /// Parse a floating-point element value, returning failure if the value isn't
-  /// valid.
-  ParseResult parseFloatElement(bool isNegative);
-
   /// Parse a list of either lists or elements, returning the dimensions of the
   /// parsed sub-tensors in dims. For example:
   ///   parseList([1, 2, 3]) -> Success, [3]
@@ -1288,12 +1444,8 @@ private:
   /// The shape inferred from the parsed elements.
   SmallVector<int64_t, 4> shape;
 
-  /// Storage used when parsing integer elements, this is a pair of <is_signed,
-  /// value>.
-  std::vector<std::pair<bool, uint64_t>> intStorage;
-
-  /// Storage used when parsing float elements.
-  std::vector<double> floatStorage;
+  /// Storage used when parsing elements, this is a pair of <is_negated, token>.
+  std::vector<std::pair<bool, Token>> storage;
 
   /// A flag that indicates the type of elements that have been parsed.
   llvm::Optional<ElementKind> knownEltKind;
@@ -1331,21 +1483,43 @@ DenseElementsAttr TensorLiteralParser::getAttr(llvm::SMLoc loc,
 DenseElementsAttr TensorLiteralParser::getIntAttr(llvm::SMLoc loc,
                                                   ShapedType type,
                                                   IntegerType eltTy) {
-  // Check to see if floating point values were parsed.
-  if (!floatStorage.empty()) {
-    p.emitError() << "expected integer elements, but parsed floating-point";
-    return nullptr;
+  std::vector<APInt> intElements;
+  intElements.reserve(storage.size());
+  for (const auto &signAndToken : storage) {
+    bool isNegative = signAndToken.first;
+    const Token &token = signAndToken.second;
+
+    // Check to see if floating point values were parsed.
+    if (token.is(Token::floatliteral)) {
+      p.emitError() << "expected integer elements, but parsed floating-point";
+      return nullptr;
+    }
+
+    assert(token.isAny(Token::integer, Token::kw_true, Token::kw_false) &&
+           "unexpected token type");
+    if (token.isAny(Token::kw_true, Token::kw_false)) {
+      if (!eltTy.isInteger(1))
+        p.emitError() << "expected i1 type for 'true' or 'false' values";
+      APInt apInt(eltTy.getWidth(), token.is(Token::kw_true),
+                  /*isSigned=*/false);
+      intElements.push_back(apInt);
+      continue;
+    }
+
+    // Create APInt values for each element with the correct bitwidth.
+    auto val = token.getUInt64IntegerValue();
+    if (!val.hasValue() || (isNegative ? (int64_t)-val.getValue() >= 0
+                                       : (int64_t)val.getValue() < 0)) {
+      p.emitError(token.getLoc(),
+                  "integer constant out of range for attribute");
+      return nullptr;
+    }
+    APInt apInt(eltTy.getWidth(), val.getValue(), isNegative);
+    if (apInt != val.getValue())
+      return (p.emitError("integer constant out of range for type"), nullptr);
+    intElements.push_back(isNegative ? -apInt : apInt);
   }
 
-  // Create APInt values for each element with the correct bitwidth.
-  std::vector<APInt> intElements;
-  intElements.reserve(intStorage.size());
-  for (auto &signAndValue : intStorage) {
-    APInt apInt(eltTy.getWidth(), signAndValue.second, signAndValue.first);
-    if (apInt != signAndValue.second)
-      return (p.emitError("integer constant out of range for type"), nullptr);
-    intElements.push_back(signAndValue.first ? -apInt : apInt);
-  }
   return DenseElementsAttr::get(type, intElements);
 }
 
@@ -1353,109 +1527,73 @@ DenseElementsAttr TensorLiteralParser::getIntAttr(llvm::SMLoc loc,
 DenseElementsAttr TensorLiteralParser::getFloatAttr(llvm::SMLoc loc,
                                                     ShapedType type,
                                                     FloatType eltTy) {
-  // Check to see if integer values were parsed.
-  if (!intStorage.empty()) {
-    p.emitError() << "expected floating-point elements, but parsed integer";
-    return nullptr;
+  std::vector<Attribute> floatValues;
+  floatValues.reserve(storage.size());
+  for (const auto &signAndToken : storage) {
+    bool isNegative = signAndToken.first;
+    const Token &token = signAndToken.second;
+
+    // Handle hexadecimal float literals.
+    if (token.is(Token::integer) && token.getSpelling().startswith("0x")) {
+      if (isNegative) {
+        p.emitError(token.getLoc())
+            << "hexadecimal float literal should not have a leading minus";
+        return nullptr;
+      }
+      auto val = token.getUInt64IntegerValue();
+      if (!val.hasValue()) {
+        p.emitError("hexadecimal float constant out of range for attribute");
+        return nullptr;
+      }
+      FloatAttr attr = buildHexadecimalFloatLiteral(&p, eltTy, *val);
+      if (!attr)
+        return nullptr;
+      floatValues.push_back(attr);
+      continue;
+    }
+
+    // Check to see if any decimal integers or booleans were parsed.
+    if (!token.is(Token::floatliteral)) {
+      p.emitError() << "expected floating-point elements, but parsed integer";
+      return nullptr;
+    }
+
+    // Build the float values from tokens.
+    auto val = token.getFloatingPointValue();
+    if (!val.hasValue()) {
+      p.emitError("floating point value too large for attribute");
+      return nullptr;
+    }
+    floatValues.push_back(FloatAttr::get(eltTy, isNegative ? -*val : *val));
   }
 
-  // Build the float values from the raw integer storage.
-  std::vector<Attribute> floatValues;
-  floatValues.reserve(floatStorage.size());
-  for (auto &elt : floatStorage)
-    floatValues.push_back(FloatAttr::get(eltTy, elt));
   return DenseElementsAttr::get(type, floatValues);
 }
 
 ParseResult TensorLiteralParser::parseElement() {
-  auto loc = p.getToken().getLoc();
-
-  ElementKind newEltKind;
   switch (p.getToken().getKind()) {
   // Parse a boolean element.
   case Token::kw_true:
   case Token::kw_false:
-    intStorage.emplace_back(false, p.getToken().is(Token::kw_true));
+  case Token::floatliteral:
+  case Token::integer:
+    storage.emplace_back(/*isNegative=*/false, p.getToken());
     p.consumeToken();
-    newEltKind = ElementKind::Boolean;
     break;
 
   // Parse a signed integer or a negative floating-point element.
   case Token::minus:
     p.consumeToken(Token::minus);
-
-    // Otherwise, check for an integer value.
-    if (p.getToken().is(Token::integer)) {
-      if (parseIntegerElement(/*isSigned=*/true))
-        return failure();
-      newEltKind = ElementKind::Integer;
-
-      // Otherwise, check for a floating point value.
-    } else if (p.getToken().is(Token::floatliteral)) {
-      if (parseFloatElement(/*isNegative=*/true))
-        return failure();
-      newEltKind = ElementKind::Float;
-    } else {
+    if (!p.getToken().isAny(Token::floatliteral, Token::integer))
       return p.emitError("expected integer or floating point literal");
-    }
+    storage.emplace_back(/*isNegative=*/true, p.getToken());
+    p.consumeToken();
     break;
 
-  // Parse a floating-point element.
-  case Token::floatliteral:
-    if (parseFloatElement(/*isNegative=*/false))
-      return failure();
-    newEltKind = ElementKind::Float;
-    break;
-
-  // Parse an integer element.
-  case Token::integer:
-    if (parseIntegerElement(/*isSigned=*/false))
-      return failure();
-    newEltKind = ElementKind::Integer;
-    break;
   default:
     return p.emitError("expected element literal of primitive type");
   }
 
-  // Check to see if the element kind has changed from the previously inferred
-  // type.
-  if (!knownEltKind)
-    knownEltKind = newEltKind;
-  else if (knownEltKind != newEltKind)
-    return p.emitError(loc)
-           << "tensor element type differs from previously inferred type, with "
-              "old type of "
-           << getElementKindStr(*knownEltKind) << ", and new type of "
-           << getElementKindStr(newEltKind);
-  return success();
-}
-
-/// Parse an integer element value, returning failure if the value isn't
-/// valid.
-ParseResult TensorLiteralParser::parseIntegerElement(bool isSigned) {
-  // Check that the integer value is valid.
-  auto val = p.getToken().getUInt64IntegerValue();
-  if (!val.hasValue() ||
-      (isSigned ? (int64_t)-val.getValue() >= 0 : (int64_t)val.getValue() < 0))
-    return p.emitError("integer constant out of range for attribute");
-
-  // Add it to the storage.
-  p.consumeToken(Token::integer);
-  intStorage.emplace_back(isSigned, *val);
-  return success();
-}
-
-/// Parse a floating-point element value, returning failure if the value isn't
-/// valid.
-ParseResult TensorLiteralParser::parseFloatElement(bool isNegative) {
-  // Check that the float value is valid.
-  auto val = p.getToken().getFloatingPointValue();
-  if (!val.hasValue())
-    return p.emitError("floating point value too large for attribute");
-
-  // Add it to the storage.
-  p.consumeToken(Token::floatliteral);
-  floatStorage.push_back(isNegative ? -val.getValue() : val.getValue());
   return success();
 }
 
@@ -1661,143 +1799,152 @@ ParseResult Parser::parseLocation(LocationAttr &loc) {
 ///                    '[' location-inst (location-inst ',')* ']'
 /// unknown-location ::= 'unknown'
 ///
-ParseResult Parser::parseLocationInstance(LocationAttr &loc) {
+ParseResult Parser::parseCallSiteLocation(LocationAttr &loc) {
+  consumeToken(Token::bare_identifier);
+
+  // Parse the '('.
+  if (parseToken(Token::l_paren, "expected '(' in callsite location"))
+    return failure();
+
+  // Parse the callee location.
+  LocationAttr calleeLoc;
+  if (parseLocationInstance(calleeLoc))
+    return failure();
+
+  // Parse the 'at'.
+  if (getToken().isNot(Token::bare_identifier) ||
+      getToken().getSpelling() != "at")
+    return emitError("expected 'at' in callsite location");
+  consumeToken(Token::bare_identifier);
+
+  // Parse the caller location.
+  LocationAttr callerLoc;
+  if (parseLocationInstance(callerLoc))
+    return failure();
+
+  // Parse the ')'.
+  if (parseToken(Token::r_paren, "expected ')' in callsite location"))
+    return failure();
+
+  // Return the callsite location.
+  loc = CallSiteLoc::get(calleeLoc, callerLoc);
+  return success();
+}
+
+ParseResult Parser::parseFusedLocation(LocationAttr &loc) {
+  consumeToken(Token::bare_identifier);
+
+  // Try to parse the optional metadata.
+  Attribute metadata;
+  if (consumeIf(Token::less)) {
+    metadata = parseAttribute();
+    if (!metadata)
+      return emitError("expected valid attribute metadata");
+    // Parse the '>' token.
+    if (parseToken(Token::greater,
+                   "expected '>' after fused location metadata"))
+      return failure();
+  }
+
+  llvm::SmallVector<Location, 4> locations;
+  auto parseElt = [&] {
+    LocationAttr newLoc;
+    if (parseLocationInstance(newLoc))
+      return failure();
+    locations.push_back(newLoc);
+    return success();
+  };
+
+  if (parseToken(Token::l_square, "expected '[' in fused location") ||
+      parseCommaSeparatedList(parseElt) ||
+      parseToken(Token::r_square, "expected ']' in fused location"))
+    return failure();
+
+  // Return the fused location.
+  loc = FusedLoc::get(locations, metadata, getContext());
+  return success();
+}
+
+ParseResult Parser::parseNameOrFileLineColLocation(LocationAttr &loc) {
   auto *ctx = getContext();
+  auto str = getToken().getStringValue();
+  consumeToken(Token::string);
 
-  // Handle either name or filelinecol locations.
-  if (getToken().is(Token::string)) {
-    auto str = getToken().getStringValue();
-    consumeToken(Token::string);
+  // If the next token is ':' this is a filelinecol location.
+  if (consumeIf(Token::colon)) {
+    // Parse the line number.
+    if (getToken().isNot(Token::integer))
+      return emitError("expected integer line number in FileLineColLoc");
+    auto line = getToken().getUnsignedIntegerValue();
+    if (!line.hasValue())
+      return emitError("expected integer line number in FileLineColLoc");
+    consumeToken(Token::integer);
 
-    // If the next token is ':' this is a filelinecol location.
-    if (consumeIf(Token::colon)) {
-      // Parse the line number.
-      if (getToken().isNot(Token::integer))
-        return emitError("expected integer line number in FileLineColLoc");
-      auto line = getToken().getUnsignedIntegerValue();
-      if (!line.hasValue())
-        return emitError("expected integer line number in FileLineColLoc");
-      consumeToken(Token::integer);
-
-      // Parse the ':'.
-      if (parseToken(Token::colon, "expected ':' in FileLineColLoc"))
-        return failure();
-
-      // Parse the column number.
-      if (getToken().isNot(Token::integer))
-        return emitError("expected integer column number in FileLineColLoc");
-      auto column = getToken().getUnsignedIntegerValue();
-      if (!column.hasValue())
-        return emitError("expected integer column number in FileLineColLoc");
-      consumeToken(Token::integer);
-
-      loc = FileLineColLoc::get(str, line.getValue(), column.getValue(), ctx);
-      return success();
-    }
-
-    // Otherwise, this is a NameLoc.
-
-    // Check for a child location.
-    if (consumeIf(Token::l_paren)) {
-      auto childSourceLoc = getToken().getLoc();
-
-      // Parse the child location.
-      LocationAttr childLoc;
-      if (parseLocationInstance(childLoc))
-        return failure();
-
-      // The child must not be another NameLoc.
-      if (childLoc.isa<NameLoc>())
-        return emitError(childSourceLoc,
-                         "child of NameLoc cannot be another NameLoc");
-      loc = NameLoc::get(Identifier::get(str, ctx), childLoc, ctx);
-
-      // Parse the closing ')'.
-      if (parseToken(Token::r_paren,
-                     "expected ')' after child location of NameLoc"))
-        return failure();
-    } else {
-      loc = NameLoc::get(Identifier::get(str, ctx), ctx);
-    }
-
-    return success();
-  }
-
-  // Check for a 'unknown' for an unknown location.
-  if (getToken().is(Token::bare_identifier) &&
-      getToken().getSpelling() == "unknown") {
-    consumeToken(Token::bare_identifier);
-    loc = UnknownLoc::get(ctx);
-    return success();
-  }
-
-  // If the token is 'fused', then this is a fused location.
-  if (getToken().is(Token::bare_identifier) &&
-      getToken().getSpelling() == "fused") {
-    consumeToken(Token::bare_identifier);
-
-    // Try to parse the optional metadata.
-    Attribute metadata;
-    if (consumeIf(Token::less)) {
-      metadata = parseAttribute();
-      if (!metadata)
-        return emitError("expected valid attribute metadata");
-      // Parse the '>' token.
-      if (parseToken(Token::greater,
-                     "expected '>' after fused location metadata"))
-        return failure();
-    }
-
-    llvm::SmallVector<Location, 4> locations;
-    auto parseElt = [&] {
-      LocationAttr newLoc;
-      if (parseLocationInstance(newLoc))
-        return failure();
-      locations.push_back(newLoc);
-      return success();
-    };
-
-    if (parseToken(Token::l_square, "expected '[' in fused location") ||
-        parseCommaSeparatedList(parseElt) ||
-        parseToken(Token::r_square, "expected ']' in fused location"))
+    // Parse the ':'.
+    if (parseToken(Token::colon, "expected ':' in FileLineColLoc"))
       return failure();
 
-    // Return the fused location.
-    loc = FusedLoc::get(locations, metadata, getContext());
+    // Parse the column number.
+    if (getToken().isNot(Token::integer))
+      return emitError("expected integer column number in FileLineColLoc");
+    auto column = getToken().getUnsignedIntegerValue();
+    if (!column.hasValue())
+      return emitError("expected integer column number in FileLineColLoc");
+    consumeToken(Token::integer);
+
+    loc = FileLineColLoc::get(str, line.getValue(), column.getValue(), ctx);
     return success();
   }
+
+  // Otherwise, this is a NameLoc.
+
+  // Check for a child location.
+  if (consumeIf(Token::l_paren)) {
+    auto childSourceLoc = getToken().getLoc();
+
+    // Parse the child location.
+    LocationAttr childLoc;
+    if (parseLocationInstance(childLoc))
+      return failure();
+
+    // The child must not be another NameLoc.
+    if (childLoc.isa<NameLoc>())
+      return emitError(childSourceLoc,
+                       "child of NameLoc cannot be another NameLoc");
+    loc = NameLoc::get(Identifier::get(str, ctx), childLoc);
+
+    // Parse the closing ')'.
+    if (parseToken(Token::r_paren,
+                   "expected ')' after child location of NameLoc"))
+      return failure();
+  } else {
+    loc = NameLoc::get(Identifier::get(str, ctx), ctx);
+  }
+
+  return success();
+}
+
+ParseResult Parser::parseLocationInstance(LocationAttr &loc) {
+  // Handle either name or filelinecol locations.
+  if (getToken().is(Token::string))
+    return parseNameOrFileLineColLocation(loc);
+
+  // Bare tokens required for other cases.
+  if (!getToken().is(Token::bare_identifier))
+    return emitError("expected location instance");
 
   // Check for the 'callsite' signifying a callsite location.
-  if (getToken().is(Token::bare_identifier) &&
-      getToken().getSpelling() == "callsite") {
+  if (getToken().getSpelling() == "callsite")
+    return parseCallSiteLocation(loc);
+
+  // If the token is 'fused', then this is a fused location.
+  if (getToken().getSpelling() == "fused")
+    return parseFusedLocation(loc);
+
+  // Check for a 'unknown' for an unknown location.
+  if (getToken().getSpelling() == "unknown") {
     consumeToken(Token::bare_identifier);
-
-    // Parse the '('.
-    if (parseToken(Token::l_paren, "expected '(' in callsite location"))
-      return failure();
-
-    // Parse the callee location.
-    LocationAttr calleeLoc;
-    if (parseLocationInstance(calleeLoc))
-      return failure();
-
-    // Parse the 'at'.
-    if (getToken().isNot(Token::bare_identifier) ||
-        getToken().getSpelling() != "at")
-      return emitError("expected 'at' in callsite location");
-    consumeToken(Token::bare_identifier);
-
-    // Parse the caller location.
-    LocationAttr callerLoc;
-    if (parseLocationInstance(callerLoc))
-      return failure();
-
-    // Parse the ')'.
-    if (parseToken(Token::r_paren, "expected ')' in callsite location"))
-      return failure();
-
-    // Return the callsite location.
-    loc = CallSiteLoc::get(calleeLoc, callerLoc, ctx);
+    loc = UnknownLoc::get(getContext());
     return success();
   }
 
@@ -2508,7 +2655,7 @@ public:
   };
 
   /// Push a new SSA name scope to the parser.
-  void pushSSANameScope();
+  void pushSSANameScope(bool isIsolated);
 
   /// Pop the last SSA name scope from the parser.
   ParseResult popSSANameScope();
@@ -2532,12 +2679,12 @@ public:
   ParseResult parseOptionalSSAUseAndTypeList(SmallVectorImpl<Value *> &results);
 
   /// Return the location of the value identified by its name and number if it
-  /// has been already defined.  Placeholder values are considered undefined.
-  llvm::Optional<SMLoc> getDefinitionLoc(StringRef name, unsigned number) {
+  /// has been already reference.
+  llvm::Optional<SMLoc> getReferenceLoc(StringRef name, unsigned number) {
+    auto &values = isolatedNameScopes.back().values;
     if (!values.count(name) || number >= values[name].size())
       return {};
-    Value *value = values[name][number].first;
-    if (value && !isForwardRefPlaceholder(value))
+    if (values[name][number].first)
       return values[name][number].second;
     return {};
   }
@@ -2561,6 +2708,11 @@ public:
   /// Parse an operation instance that is in the generic form.
   Operation *parseGenericOperation();
 
+  /// Parse an operation instance that is in the generic form and insert it at
+  /// the provided insertion point.
+  Operation *parseGenericOperation(Block *insertBlock,
+                                   Block::iterator insertPt);
+
   /// Parse an operation instance that is in the op-defined custom form.
   Operation *parseCustomOperation();
 
@@ -2569,8 +2721,11 @@ public:
   //===--------------------------------------------------------------------===//
 
   /// Parse a region into 'region' with the provided entry block arguments.
+  /// 'isIsolatedNameScope' indicates if the naming scope of this region is
+  /// isolated from those above.
   ParseResult parseRegion(Region &region,
-                          ArrayRef<std::pair<SSAUseInfo, Type>> entryArguments);
+                          ArrayRef<std::pair<SSAUseInfo, Type>> entryArguments,
+                          bool isIsolatedNameScope = false);
 
   /// Parse a region body into 'region'.
   ParseResult parseRegionBody(Region &region);
@@ -2614,9 +2769,10 @@ private:
   bool eraseForwardRef(Block *block) { return forwardRef.back().erase(block); }
 
   /// Record that a definition was added at the current scope.
-  void recordDefinition(StringRef def) {
-    definitionsPerScope.back().insert(def);
-  }
+  void recordDefinition(StringRef def);
+
+  /// Get the value entry for the given SSA name.
+  SmallVectorImpl<std::pair<Value *, SMLoc>> &getSSAValueEntry(StringRef name);
 
   /// Create a forward reference placeholder value with the given location and
   /// result type.
@@ -2627,18 +2783,41 @@ private:
     return forwardRefPlaceholders.count(value);
   }
 
+  /// This struct represents an isolated SSA name scope. This scope may contain
+  /// other nested non-isolated scopes. These scopes are used for operations
+  /// that are known to be isolated to allow for reusing names within their
+  /// regions, even if those names are used above.
+  struct IsolatedSSANameScope {
+    /// Record that a definition was added at the current scope.
+    void recordDefinition(StringRef def) {
+      definitionsPerScope.back().insert(def);
+    }
+
+    /// Push a nested name scope.
+    void pushSSANameScope() { definitionsPerScope.push_back({}); }
+
+    /// Pop a nested name scope.
+    void popSSANameScope() {
+      for (auto &def : definitionsPerScope.pop_back_val())
+        values.erase(def.getKey());
+    }
+
+    /// This keeps track of all of the SSA values we are tracking for each name
+    /// scope, indexed by their name. This has one entry per result number.
+    llvm::StringMap<SmallVector<std::pair<Value *, SMLoc>, 1>> values;
+
+    /// This keeps track of all of the values defined by a specific name scope.
+    SmallVector<llvm::StringSet<>, 2> definitionsPerScope;
+  };
+
+  /// A list of isolated name scopes.
+  SmallVector<IsolatedSSANameScope, 2> isolatedNameScopes;
+
   /// This keeps track of the block names as well as the location of the first
   /// reference for each nested name scope. This is used to diagnose invalid
   /// block references and memoize them.
   SmallVector<DenseMap<StringRef, std::pair<Block *, SMLoc>>, 2> blocksByName;
   SmallVector<DenseMap<Block *, SMLoc>, 2> forwardRef;
-
-  /// This keeps track of all of the SSA values we are tracking for each name
-  /// scope, indexed by their name. This has one entry per result number.
-  llvm::StringMap<SmallVector<std::pair<Value *, SMLoc>, 1>> values;
-
-  /// This keeps track of all of the values defined by a specific name scope.
-  SmallVector<llvm::StringSet<>, 2> definitionsPerScope;
 
   /// These are all of the placeholders we've made along with the location of
   /// their first reference, to allow checking for use of undefined values.
@@ -2687,10 +2866,14 @@ ParseResult OperationParser::finalize() {
 // SSA Value Handling
 //===----------------------------------------------------------------------===//
 
-void OperationParser::pushSSANameScope() {
+void OperationParser::pushSSANameScope(bool isIsolated) {
   blocksByName.push_back(DenseMap<StringRef, std::pair<Block *, SMLoc>>());
   forwardRef.push_back(DenseMap<Block *, SMLoc>());
-  definitionsPerScope.push_back({});
+
+  // Push back a new name definition scope.
+  if (isIsolated)
+    isolatedNameScopes.push_back({});
+  isolatedNameScopes.back().pushSSANameScope();
 }
 
 ParseResult OperationParser::popSSANameScope() {
@@ -2714,17 +2897,21 @@ ParseResult OperationParser::popSSANameScope() {
     return failure();
   }
 
-  // Drop any values defined in this scope from the value map.
-  for (auto &def : definitionsPerScope.pop_back_val())
-    values.erase(def.getKey());
-  blocksByName.pop_back();
+  // Pop the next nested namescope. If there is only one internal namescope,
+  // just pop the isolated scope.
+  auto &currentNameScope = isolatedNameScopes.back();
+  if (currentNameScope.definitionsPerScope.size() == 1)
+    isolatedNameScopes.pop_back();
+  else
+    currentNameScope.popSSANameScope();
 
+  blocksByName.pop_back();
   return success();
 }
 
 /// Register a definition of a value with the symbol table.
 ParseResult OperationParser::addDefinition(SSAUseInfo useInfo, Value *value) {
-  auto &entries = values[useInfo.name];
+  auto &entries = getSSAValueEntry(useInfo.name);
 
   // Make sure there is a slot for this value.
   if (entries.size() <= useInfo.number)
@@ -2798,7 +2985,7 @@ ParseResult OperationParser::parseSSAUse(SSAUseInfo &result) {
 /// Given an unbound reference to an SSA value and its type, return the value
 /// it specifies.  This returns null on failure.
 Value *OperationParser::resolveSSAUse(SSAUseInfo useInfo, Type type) {
-  auto &entries = values[useInfo.name];
+  auto &entries = getSSAValueEntry(useInfo.name);
 
   // If we have already seen a value of this name, return it.
   if (useInfo.number < entries.size() && entries[useInfo.number].first) {
@@ -2887,6 +3074,17 @@ ParseResult OperationParser::parseOptionalSSAUseAndTypeList(
   return success();
 }
 
+/// Record that a definition was added at the current scope.
+void OperationParser::recordDefinition(StringRef def) {
+  isolatedNameScopes.back().recordDefinition(def);
+}
+
+/// Get the value entry for the given SSA name.
+SmallVectorImpl<std::pair<Value *, SMLoc>> &
+OperationParser::getSSAValueEntry(StringRef name) {
+  return isolatedNameScopes.back().values[name];
+}
+
 /// Create and remember a new placeholder for a forward reference.
 Value *OperationParser::createForwardRefPlaceholder(SMLoc loc, Type type) {
   // Forward references are always created as operations, because we just need
@@ -2897,9 +3095,9 @@ Value *OperationParser::createForwardRefPlaceholder(SMLoc loc, Type type) {
   // them.
   auto name = OperationName("placeholder", getContext());
   auto *op = Operation::create(
-      getEncodedSourceLocation(loc), name, /*operands=*/{}, type,
+      getEncodedSourceLocation(loc), name, type, /*operands=*/{},
       /*attributes=*/llvm::None, /*successors=*/{}, /*numRegions=*/0,
-      /*resizableOperandList=*/false, getContext());
+      /*resizableOperandList=*/false);
   forwardRefPlaceholders[op->getResult(0)] = loc;
   return op->getResult(0);
 }
@@ -3164,26 +3362,31 @@ Operation *OperationParser::parseGenericOperation() {
   return opBuilder.createOperation(result);
 }
 
+Operation *OperationParser::parseGenericOperation(Block *insertBlock,
+                                                  Block::iterator insertPt) {
+  OpBuilder::InsertionGuard restoreInsertionPoint(opBuilder);
+  opBuilder.setInsertionPoint(insertBlock, insertPt);
+  return parseGenericOperation();
+}
+
 namespace {
 class CustomOpAsmParser : public OpAsmParser {
 public:
-  CustomOpAsmParser(SMLoc nameLoc, StringRef opName, OperationParser &parser)
-      : nameLoc(nameLoc), opName(opName), parser(parser) {}
+  CustomOpAsmParser(SMLoc nameLoc, const AbstractOperation *opDefinition,
+                    OperationParser &parser)
+      : nameLoc(nameLoc), opDefinition(opDefinition), parser(parser) {}
 
   /// Parse an instance of the operation described by 'opDefinition' into the
   /// provided operation state.
-  ParseResult parseOperation(const AbstractOperation *opDefinition,
-                             OperationState *opState) {
-    if (opDefinition->parseAssembly(this, opState))
+  ParseResult parseOperation(OperationState &opState) {
+    if (opDefinition->parseAssembly(*this, opState))
       return failure();
-
-    // Check that none of the operands of the current operation reference an
-    // entry block argument for any of the region.
-    for (auto *entryArg : parsedRegionEntryArgumentPlaceholders)
-      if (llvm::is_contained(opState->operands, entryArg))
-        return emitError(nameLoc, "operand use before it's defined");
-
     return success();
+  }
+
+  Operation *parseGenericOperation(Block *insertBlock,
+                                   Block::iterator insertPt) final {
+    return parser.parseGenericOperation(insertBlock, insertPt);
   }
 
   //===--------------------------------------------------------------------===//
@@ -3196,7 +3399,8 @@ public:
   /// Emit a diagnostic at the specified location and return failure.
   InFlightDiagnostic emitError(llvm::SMLoc loc, const Twine &message) override {
     emittedError = true;
-    return parser.emitError(loc, "custom op '" + opName + "' " + message);
+    return parser.emitError(loc, "custom op '" + opDefinition->name + "' " +
+                                     message);
   }
 
   llvm::SMLoc getCurrentLocation() override {
@@ -3241,23 +3445,14 @@ public:
     return success(parser.consumeIf(Token::comma));
   }
 
+  /// Parses a `...` if present.
+  ParseResult parseOptionalEllipsis() override {
+    return success(parser.consumeIf(Token::ellipsis));
+  }
+
   /// Parse a `=` token.
   ParseResult parseEqual() override {
     return parser.parseToken(Token::equal, "expected '='");
-  }
-
-  /// Parse a keyword if present.
-  ParseResult parseOptionalKeyword(const char *keyword) override {
-    // Check that the current token is a bare identifier or keyword.
-    if (parser.getToken().isNot(Token::bare_identifier) &&
-        !parser.getToken().isKeyword())
-      return failure();
-
-    if (parser.getTokenSpelling() == keyword) {
-      parser.consumeToken();
-      return success();
-    }
-    return failure();
   }
 
   /// Parse a `(` token.
@@ -3323,6 +3518,50 @@ public:
     if (parser.getToken().isNot(Token::l_brace))
       return success();
     return parser.parseAttributeDict(result);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Identifier Parsing
+  //===--------------------------------------------------------------------===//
+
+  /// Returns if the current token corresponds to a keyword.
+  bool isCurrentTokenAKeyword() const {
+    return parser.getToken().is(Token::bare_identifier) ||
+           parser.getToken().isKeyword();
+  }
+
+  /// Parse the given keyword if present.
+  ParseResult parseOptionalKeyword(StringRef keyword) override {
+    // Check that the current token has the same spelling.
+    if (!isCurrentTokenAKeyword() || parser.getTokenSpelling() != keyword)
+      return failure();
+    parser.consumeToken();
+    return success();
+  }
+
+  /// Parse a keyword, if present, into 'keyword'.
+  ParseResult parseOptionalKeyword(StringRef *keyword) override {
+    // Check that the current token is a keyword.
+    if (!isCurrentTokenAKeyword())
+      return failure();
+
+    *keyword = parser.getTokenSpelling();
+    parser.consumeToken();
+    return success();
+  }
+
+  /// Parse an @-identifier and store it (without the '@' symbol) in a string
+  /// attribute named 'attrName'.
+  ParseResult parseSymbolName(StringAttr &result, StringRef attrName,
+                              SmallVectorImpl<NamedAttribute> &attrs) override {
+    Token atToken = parser.getToken();
+    if (atToken.isNot(Token::at_identifier))
+      return failure();
+
+    result = getBuilder().getStringAttr(extractSymbolReference(atToken));
+    attrs.push_back(getBuilder().getNamedAttr(attrName, result));
+    parser.consumeToken();
+    return success();
   }
 
   //===--------------------------------------------------------------------===//
@@ -3493,7 +3732,8 @@ public:
   /// Parse a region that takes `arguments` of `argTypes` types.  This
   /// effectively defines the SSA values of `arguments` and assignes their type.
   ParseResult parseRegion(Region &region, ArrayRef<OperandType> arguments,
-                          ArrayRef<Type> argTypes) override {
+                          ArrayRef<Type> argTypes,
+                          bool enableNameShadowing) override {
     assert(arguments.size() == argTypes.size() &&
            "mismatching number of arguments and types");
 
@@ -3505,42 +3745,31 @@ public:
       OperationParser::SSAUseInfo operandInfo = {operand.name, operand.number,
                                                  operand.location};
       regionArguments.emplace_back(operandInfo, type);
-
-      // Create a placeholder for this argument so that we can detect invalid
-      // references to region arguments.
-      Value *value = parser.resolveSSAUse(operandInfo, type);
-      if (!value)
-        return failure();
-      parsedRegionEntryArgumentPlaceholders.emplace_back(value);
     }
 
-    return parser.parseRegion(region, regionArguments);
+    // Try to parse the region.
+    assert((!enableNameShadowing ||
+            opDefinition->hasProperty(OperationProperty::IsolatedFromAbove)) &&
+           "name shadowing is only allowed on isolated regions");
+    if (parser.parseRegion(region, regionArguments, enableNameShadowing))
+      return failure();
+    return success();
   }
 
   /// Parses a region if present.
   ParseResult parseOptionalRegion(Region &region,
                                   ArrayRef<OperandType> arguments,
-                                  ArrayRef<Type> argTypes) override {
+                                  ArrayRef<Type> argTypes,
+                                  bool enableNameShadowing) override {
     if (parser.getToken().isNot(Token::l_brace))
       return success();
-    return parseRegion(region, arguments, argTypes);
+    return parseRegion(region, arguments, argTypes, enableNameShadowing);
   }
 
-  /// Parse a region argument.  Region arguments define new values, so this also
-  /// checks if the values with the same name has not been defined yet.  The
-  /// type of the argument will be resolved later by a call to `parseRegion`.
+  /// Parse a region argument. The type of the argument will be resolved later
+  /// by a call to `parseRegion`.
   ParseResult parseRegionArgument(OperandType &argument) override {
-    // Use parseOperand to fill in the OperandType structure.
-    if (parseOperand(argument))
-      return failure();
-    if (auto defLoc = parser.getDefinitionLoc(argument.name, argument.number)) {
-      parser.emitError(argument.location,
-                       "redefinition of SSA value '" + argument.name + "'")
-              .attachNote(parser.getEncodedSourceLocation(*defLoc))
-          << "previously defined here";
-      return failure();
-    }
-    return success();
+    return parseOperand(argument);
   }
 
   /// Parse a region argument if present.
@@ -3609,14 +3838,11 @@ public:
   }
 
 private:
-  /// A set of placeholder value definitions for parsed region arguments.
-  SmallVector<Value *, 2> parsedRegionEntryArgumentPlaceholders;
-
   /// The source location of the operation name.
   SMLoc nameLoc;
 
-  /// The name of the operation.
-  StringRef opName;
+  /// The abstract information of the operation.
+  const AbstractOperation *opDefinition;
 
   /// The main operation parser.
   OperationParser &parser;
@@ -3629,7 +3855,6 @@ private:
 Operation *OperationParser::parseCustomOperation() {
   auto opLoc = getToken().getLoc();
   auto opName = getTokenSpelling();
-  CustomOpAsmParser opAsmParser(opLoc, opName, *this);
 
   auto *opDefinition = AbstractOperation::lookup(opName, getContext());
   if (!opDefinition && !opName.contains('.')) {
@@ -3642,7 +3867,7 @@ Operation *OperationParser::parseCustomOperation() {
   }
 
   if (!opDefinition) {
-    opAsmParser.emitError(opLoc, "is unknown");
+    emitError(opLoc) << "custom op '" << opName << "' is unknown";
     return nullptr;
   }
 
@@ -3660,7 +3885,8 @@ Operation *OperationParser::parseCustomOperation() {
   // Have the op implementation take a crack and parsing this.
   OperationState opState(srcLocation, opDefinition->name);
   CleanupOpStateRegions guard{opState};
-  if (opAsmParser.parseOperation(opDefinition, &opState))
+  CustomOpAsmParser opAsmParser(opLoc, opDefinition, *this);
+  if (opAsmParser.parseOperation(opState))
     return nullptr;
 
   // If it emitted an error, we failed.
@@ -3681,7 +3907,8 @@ Operation *OperationParser::parseCustomOperation() {
 ///
 ParseResult OperationParser::parseRegion(
     Region &region,
-    ArrayRef<std::pair<OperationParser::SSAUseInfo, Type>> entryArguments) {
+    ArrayRef<std::pair<OperationParser::SSAUseInfo, Type>> entryArguments,
+    bool isIsolatedNameScope) {
   // Parse the '{'.
   if (parseToken(Token::l_brace, "expected '{' to begin a region"))
     return failure();
@@ -3692,19 +3919,28 @@ ParseResult OperationParser::parseRegion(
   auto currentPt = opBuilder.saveInsertionPoint();
 
   // Push a new named value scope.
-  pushSSANameScope();
+  pushSSANameScope(isIsolatedNameScope);
 
   // Parse the first block directly to allow for it to be unnamed.
   Block *block = new Block();
 
   // Add arguments to the entry block.
   if (!entryArguments.empty()) {
-    for (auto &placeholderArgPair : entryArguments)
+    for (auto &placeholderArgPair : entryArguments) {
+      auto &argInfo = placeholderArgPair.first;
+      // Ensure that the argument was not already defined.
+      if (auto defLoc = getReferenceLoc(argInfo.name, argInfo.number)) {
+        return emitError(argInfo.loc, "region entry argument '" + argInfo.name +
+                                          "' is already in use")
+                   .attachNote(getEncodedSourceLocation(*defLoc))
+               << "previously referenced here";
+      }
       if (addDefinition(placeholderArgPair.first,
                         block->addArgument(placeholderArgPair.second))) {
         delete block;
         return failure();
       }
+    }
 
     // If we had named arguments, then don't allow a block name.
     if (getToken().is(Token::caret_identifier))
@@ -3966,7 +4202,11 @@ ParseResult ModuleParser::parseTypeAliasDef() {
 /// This is the top-level module parser.
 ParseResult ModuleParser::parseModule(ModuleOp module) {
   OperationParser opParser(getState(), module);
-  while (1) {
+
+  // Module itself is a name scope.
+  opParser.pushSSANameScope(/*isIsolated=*/true);
+
+  while (true) {
     switch (getToken().getKind()) {
     default:
       // Parse a top-level operation.
@@ -3997,7 +4237,7 @@ ParseResult ModuleParser::parseModule(ModuleOp module) {
         bodyBlocks.pop_front();
       }
 
-      return success();
+      return opParser.popSSANameScope();
     }
 
     // If we got an error token, then the lexer already emitted an error, just
@@ -4026,8 +4266,8 @@ ParseResult ModuleParser::parseModule(ModuleOp module) {
 /// This parses the file specified by the indicated SourceMgr and returns an
 /// MLIR module if it was valid.  If not, it emits diagnostics and returns
 /// null.
-ModuleOp mlir::parseSourceFile(const llvm::SourceMgr &sourceMgr,
-                               MLIRContext *context) {
+OwningModuleRef mlir::parseSourceFile(const llvm::SourceMgr &sourceMgr,
+                                      MLIRContext *context) {
   auto sourceBuf = sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID());
 
   // This is the result module we are parsing into.
@@ -4043,13 +4283,14 @@ ModuleOp mlir::parseSourceFile(const llvm::SourceMgr &sourceMgr,
   if (failed(verify(*module)))
     return nullptr;
 
-  return module.release();
+  return module;
 }
 
 /// This parses the file specified by the indicated filename and returns an
 /// MLIR module if it was valid.  If not, the error message is emitted through
 /// the error handler registered in the context, and a null pointer is returned.
-ModuleOp mlir::parseSourceFile(StringRef filename, MLIRContext *context) {
+OwningModuleRef mlir::parseSourceFile(StringRef filename,
+                                      MLIRContext *context) {
   llvm::SourceMgr sourceMgr;
   return parseSourceFile(filename, sourceMgr, context);
 }
@@ -4058,8 +4299,9 @@ ModuleOp mlir::parseSourceFile(StringRef filename, MLIRContext *context) {
 /// SourceMgr and returns an MLIR module if it was valid.  If not, the error
 /// message is emitted through the error handler registered in the context, and
 /// a null pointer is returned.
-ModuleOp mlir::parseSourceFile(StringRef filename, llvm::SourceMgr &sourceMgr,
-                               MLIRContext *context) {
+OwningModuleRef mlir::parseSourceFile(StringRef filename,
+                                      llvm::SourceMgr &sourceMgr,
+                                      MLIRContext *context) {
   if (sourceMgr.getNumBuffers() != 0) {
     // TODO(b/136086478): Extend to support multiple buffers.
     emitError(mlir::UnknownLoc::get(context),
@@ -4080,7 +4322,8 @@ ModuleOp mlir::parseSourceFile(StringRef filename, llvm::SourceMgr &sourceMgr,
 
 /// This parses the program string to a MLIR module if it was valid. If not,
 /// it emits diagnostics and returns null.
-ModuleOp mlir::parseSourceString(StringRef moduleStr, MLIRContext *context) {
+OwningModuleRef mlir::parseSourceString(StringRef moduleStr,
+                                        MLIRContext *context) {
   auto memBuffer = MemoryBuffer::getMemBuffer(moduleStr);
   if (!memBuffer)
     return nullptr;
@@ -4090,7 +4333,8 @@ ModuleOp mlir::parseSourceString(StringRef moduleStr, MLIRContext *context) {
   return parseSourceFile(sourceMgr, context);
 }
 
-Type mlir::parseType(llvm::StringRef typeStr, MLIRContext *context) {
+Type mlir::parseType(llvm::StringRef typeStr, MLIRContext *context,
+                     size_t &numRead) {
   SourceMgr sourceMgr;
   auto memBuffer =
       MemoryBuffer::getMemBuffer(typeStr, /*BufferName=*/"<mlir_type_buffer>",
@@ -4099,18 +4343,18 @@ Type mlir::parseType(llvm::StringRef typeStr, MLIRContext *context) {
   SourceMgrDiagnosticHandler sourceMgrHandler(sourceMgr, context);
   ParserState state(sourceMgr, context);
   Parser parser(state);
+
   auto start = parser.getToken().getLoc();
   auto ty = parser.parseType();
   if (!ty)
     return Type();
 
   auto end = parser.getToken().getLoc();
-  auto read = end.getPointer() - start.getPointer();
-  // Make sure that the parsing of type consumes the entire string
-  if (static_cast<size_t>(read) < typeStr.size()) {
-    parser.emitError("unexpected additional tokens: '")
-        << typeStr.substr(read) << "' after parsing type: " << ty;
-    return Type();
-  }
+  numRead = static_cast<size_t>(end.getPointer() - start.getPointer());
   return ty;
+}
+
+Type mlir::parseType(llvm::StringRef typeStr, MLIRContext *context) {
+  size_t numRead = 0;
+  return parseType(typeStr, context, numRead);
 }

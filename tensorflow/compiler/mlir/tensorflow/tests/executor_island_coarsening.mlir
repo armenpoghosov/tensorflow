@@ -89,9 +89,7 @@ func @empty_islands(%arg0 : tensor<i1>, %arg1 : tensor<i1>) -> (tensor<i1>, tens
   return %0#0, %0#1 : tensor<i1>, tensor<i1>
 }
 
-// CHECK:        %[[ISLAND:[0-9]*]]:3 = tf_executor.island {
-// CHECK-NEXT:     %[[OP_A:[0-9]*]]:2 = "tf.opA"(%[[ARG_1]], %[[ARG_0]])
-// CHECK-NEXT:     tf_executor.yield %[[OP_A]]#0, %[[OP_A]]#1 : tensor<i1>, tensor<i1>
+// CHECK:        %[[ISLAND:[0-9]*]]:3 = tf_executor.island wraps "tf.opA"(%[[ARG_1]], %[[ARG_0]])
 // CHECK:        tf_executor.fetch %[[ISLAND]]#0, %[[ISLAND]]#1 : tensor<i1>, tensor<i1>
 
 
@@ -219,19 +217,15 @@ func @islands_interleaved(%arg0 : tensor<i32>, %arg1 : tensor<i32>) -> (tensor<i
   return %0#0, %0#1 : tensor<i32>, tensor<i32>
 }
 
-// CHECK:        %[[ISLAND_0:[0-9]*]]:2 = tf_executor.island {
-// CHECK-NEXT:     %[[OP_B:[0-9]*]] = "tf.opB"(%[[ARG_1]])
-// CHECK-NEXT:     %[[OP_D:[0-9]*]] = "tf.opD"(%[[OP_B]])
-// CHECK-NEXT:     tf_executor.yield %[[OP_D]] : tensor<i32>
-// CHECK:        %[[ISLAND_1:[0-9]*]]:2 = tf_executor.island {
+// CHECK:        %[[ISLAND_0:[0-9]*]]:3 = tf_executor.island {
 // CHECK-NEXT:     %[[OP_A:[0-9]*]] = "tf.opA"(%[[ARG_0]])
 // CHECK-NEXT:     %[[OP_C:[0-9]*]] = "tf.opC"(%[[OP_A]])
 // CHECK-NEXT:     %{{[0-9]*}} = "tf.opE"(%[[ARG_0]])
-// CHECK-NEXT:     tf_executor.yield %[[OP_C]] : tensor<i32>
-// CHECK:        %{{[0-9]*}}:2 = tf_executor.island {
-// CHECK-NEXT:     %[[OP_F:[0-9]*]] = "tf.opF"(%[[ARG_1]])
-// CHECK-NEXT:     tf_executor.yield %[[OP_F]] : tensor<i32>
-// CHECK:        tf_executor.fetch %[[ISLAND_0]]#0, %[[ISLAND_1]]#0 : tensor<i32>, tensor<i32>
+// CHECK-NEXT:     %[[OP_B:[0-9]*]] = "tf.opB"(%[[ARG_1]])
+// CHECK-NEXT:     %[[OP_D:[0-9]*]] = "tf.opD"(%[[OP_B]])
+// CHECK-NEXT:     tf_executor.yield %[[OP_D]], %[[OP_C]] : tensor<i32>, tensor<i32>
+// CHECK:        tf_executor.island wraps "tf.opF"(%[[ARG_1]])
+// CHECK:        tf_executor.fetch %[[ISLAND_0]]#0, %[[ISLAND_0]]#1 : tensor<i32>, tensor<i32>
 
 
 // Test only islands are merged when other tf_executor ops are interleaved.
@@ -279,13 +273,9 @@ func @merge_islands_only() {
   return
 }
 
-// CHECK:        %[[ISLAND_0:[0-9]*]]:2 = tf_executor.island {
-// CHECK-NEXT:     %[[OP_A:.*]] = "tf.opA"
-// CHECK-NEXT:     tf_executor.yield %[[OP_A]] : tensor<i32>
+// CHECK:        %[[ISLAND_0:[0-9]*]]:2 = tf_executor.island wraps "tf.opA"
 // CHECK:        %[[ENTER:[0-9]*]]:2 = tf_executor.Enter %[[ISLAND_0]]#0
-// CHECK-NEXT:   %[[ISLAND_1:[0-9]*]] = tf_executor.island {
-// CHECK-NEXT:     "tf.opB"()
-// CHECK-NEXT:     tf_executor.yield
+// CHECK-NEXT:   %[[ISLAND_1:[0-9]*]] = tf_executor.island wraps "tf.opB"()
 // CHECK:        %[[NEXTIT_SRC:[0-9]*]]:3 = tf_executor.NextIteration.Source
 // CHECK-NEXT:   %[[MERGE:[0-9]*]]:3 = tf_executor.Merge %[[NEXTIT_SRC]]#0, %[[ENTER]]#0
 // CHECK-NEXT:   %[[ISLAND_2:[0-9]*]]:2 = tf_executor.island(%[[MERGE]]#2) {
@@ -302,7 +292,6 @@ func @merge_islands_only() {
 // CHECK-NEXT:     tf_executor.yield %[[OP_G]] : tensor<*xi32>
 // CHECK:        %[[CT:[0-9]*]] = tf_executor.ControlTrigger %[[ISLAND_1]], %[[ISLAND_3]]#1, %[[EXIT]]#1
 // CHECK-NEXT:   tf_executor.NextIteration.Sink [%[[NEXTIT_SRC]]#1] %[[ISLAND_3]]#0, %[[CT]]
-// CHECK-NEXT:   tf_executor.fetch
 
 
 // Test no merging took place as cycle would be formed otherwise.
@@ -323,14 +312,11 @@ func @simple_potential_cycle() {
   return
 }
 
-// CHECK:        %[[ISLAND:[0-9]*]]:2 = tf_executor.island {
-// CHECK-NEXT:     %[[OP_A:[0-9]*]] = "tf.opA"
-// CHECK-NEXT:     tf_executor.yield %[[OP_A]] : tensor<1xf32>
+// CHECK:        %[[ISLAND:[0-9]*]]:2 = tf_executor.island wraps "tf.opA"
 // CHECK:        %[[CT:[0-9]*]] = tf_executor.ControlTrigger %[[ISLAND]]#1
-// CHECK-NEXT:   %{{[0-9]*}}:3 = tf_executor.island(%[[CT]]) {
+// CHECK-NEXT:   tf_executor.island(%[[CT]]) {
 // CHECK-NEXT:     %[[OP_B:[0-9]*]] = "tf.opB"
 // CHECK-NEXT:     tf_executor.yield %[[ISLAND]]#0, %[[OP_B]] : tensor<1xf32>, tensor<1xf32>
-// CHECK:        tf_executor.fetch
 
 
 // Test if island was merged into its result.
@@ -352,8 +338,155 @@ func @merge_into_result() {
 }
 
 // CHECK:        %[[CT:[0-9]*]] = tf_executor.ControlTrigger
-// CHECK-NEXT:   %{{[0-9]*}} = tf_executor.island(%[[CT]]) {
+// CHECK-NEXT:   tf_executor.island(%[[CT]]) {
 // CHECK-NEXT:     "tf.opA"
 // CHECK-NEXT:     "tf.opB"
 // CHECK-NEXT:     tf_executor.yield
-// CHECK:        tf_executor.fetch
+
+
+// Test merging island into data result nested in a graph of another island.
+// CHECK-LABEL: func @merge_into_nested_data_result
+func @merge_into_nested_data_result() {
+  tf_executor.graph {
+    %0:2 = tf_executor.island {
+      %1 = "tf.opA"() : () -> tensor<1xf32>
+      tf_executor.yield %1 : tensor<1xf32>
+    }
+    %2:2 = tf_executor.island {
+      %3 = tf_executor.graph {
+        %4 = tf_executor.ControlTrigger {}
+        %5:2 = tf_executor.island(%4) {
+          %6 = "tf.opB"(%0#0) : (tensor<1xf32>) -> tensor<1xf32>
+          tf_executor.yield %6 : tensor<1xf32>
+        }
+        tf_executor.fetch %5#0 : tensor<1xf32>
+      }
+      tf_executor.yield %3 : tensor<1xf32>
+    }
+    tf_executor.fetch
+  }
+  return
+}
+
+// CHECK:        tf_executor.island {
+// CHECK-NEXT:     [[OP_A:[0-9*]]] = "tf.opA"
+// CHECK-NEXT:     [[INNER_GRAPH:[0-9]*]] = tf_executor.graph {
+// CHECK-NEXT:       [[CT:[0-9]*]] = tf_executor.ControlTrigger
+// CHECK-NEXT:       [[ISLAND_1:[0-9]*]]:2 = tf_executor.island(%[[CT]]) wraps "tf.opB"(%[[OP_A]])
+// CHECK:            tf_executor.fetch %[[ISLAND_1]]#0 : tensor<1xf32>
+// CHECK:          tf_executor.yield
+
+
+// Test merging islands in a nested graph.
+// CHECK-LABEL: func @merge_islands_inner_graph
+func @merge_islands_inner_graph() {
+  tf_executor.graph {
+    %0:2 = tf_executor.island {
+      %1 = "tf.opA"() : () -> tensor<1xf32>
+      tf_executor.yield %1 : tensor<1xf32>
+    }
+    %2:2 = tf_executor.island {
+      %3 = tf_executor.graph {
+        %4:2 = tf_executor.island {
+          %5 = "tf.opB"() : () -> tensor<1xf32>
+          tf_executor.yield %5 : tensor<1xf32>
+        }
+        %6:2 = tf_executor.island {
+          %7 = "tf.opC"() : () -> tensor<1xf32>
+          tf_executor.yield %7 : tensor<1xf32>
+        }
+        %8:2 = tf_executor.island(%4#1) {
+          %9 = "tf.opD"(%6#0) : (tensor<1xf32>) -> tensor<1xf32>
+          tf_executor.yield %9 : tensor<1xf32>
+        }
+        tf_executor.fetch %8#0 : tensor<1xf32>
+      }
+      tf_executor.yield %3 : tensor<1xf32>
+    }
+    tf_executor.fetch
+  }
+  return
+}
+
+// CHECK:        tf_executor.island wraps "tf.opA"
+// CHECK:        tf_executor.island wraps "tf_executor.graph"() ( {
+// CHECK-NEXT:       [[ISLAND_1:[0-9]*]]:2 = tf_executor.island {
+// CHECK-NEXT:         "tf.opB"
+// CHECK-NEXT:         [[OP_C:[0-9]*]] = "tf.opC"
+// CHECK-NEXT:         [[OP_D:[0-9]*]] = "tf.opD"(%[[OP_C]])
+// CHECK-NEXT:         tf_executor.yield %[[OP_D]] : tensor<1xf32>
+// CHECK:            tf_executor.fetch %[[ISLAND_1]]#0 : tensor<1xf32>
+
+
+// Test merging islands with control island operands and island results only if
+// they are the closest ones.
+// CHECK-LABEL: func @merge_islands_closest_control
+func @merge_islands_closest_control() {
+  tf_executor.graph {
+    %0 = tf_executor.island {
+      tf_executor.yield
+    }
+    %1 = tf_executor.ControlTrigger %0
+    %2 = tf_executor.ControlTrigger {}
+    %3 = tf_executor.island(%0, %2) {
+      tf_executor.yield
+    }
+    tf_executor.fetch
+  }
+  return
+}
+
+// CHECK: %[[ISLAND:[0-9]*]] = tf_executor.island
+// CHECK: tf_executor.ControlTrigger %[[ISLAND]]
+// CHECK: %[[CT:[0-9]*]] = tf_executor.ControlTrigger
+// CHECK: tf_executor.island(%[[ISLAND]], %[[CT]])
+
+// Test that islands which independently feed into a fetch are merged.
+// CHECK-LABEL: func @merge_independently_fetched_islands
+func @merge_independently_fetched_islands(%arg0: tensor<i32>) -> (tensor<i32>, tensor<i1>) {
+  %0:2 = tf_executor.graph {
+    %1:2 = tf_executor.island wraps "tf.Const"() {value = dense<0> : tensor<i32>} : () -> tensor<i32>
+    %2:2 = tf_executor.island wraps "tf.Const"() {value = dense<true> : tensor<i1>} : () -> tensor<i1>
+    tf_executor.fetch %1#0, %2#0 : tensor<i32>, tensor<i1>
+  }
+  return %0#0, %0#1 : tensor<i32>, tensor<i1>
+}
+
+// CHECK:      tf_executor.island
+// CHECK-NEXT:   "tf.Const"
+// CHECK-NEXT:   "tf.Const"
+// CHECK-NEXT:   tf_executor.yield
+
+
+// Check that we merge two islands with independent fetches, when one is a data
+// fetch and the other is a control fetch.
+// CHECK-LABEL: func @merge_independently_fetched_islands_data_and_control
+func @merge_independently_fetched_islands_data_and_control(%arg0: tensor<i32>) -> tensor<i32> {
+  %0 = tf_executor.graph {
+    %1:2 = tf_executor.island wraps "tf.Const"() {value = dense<0> : tensor<i32>} : () -> tensor<i32>
+    %2 = tf_executor.island { tf_executor.yield }
+    tf_executor.fetch %1#0, %2 : tensor<i32>, !tf_executor.control
+  }
+  return %0#0 : tensor<i32>
+}
+
+// CHECK:      tf_executor.graph
+// CHECK-NEXT:   %[[ISLAND:[0-9]*]]:2 = tf_executor.island wraps "tf.Const"
+// CHECK-NEXT:   tf_executor.fetch %[[ISLAND]]#0, %[[ISLAND]]#1
+
+// Check that we merge two islands with independent fetches, when both are
+// control fetches.
+// CHECK-LABEL: func @merge_independently_fetched_islands_control_and_control
+func @merge_independently_fetched_islands_control_and_control(%arg0: tensor<i32>) {
+ tf_executor.graph {
+    %1 = tf_executor.island { tf_executor.yield }
+    %2 = tf_executor.island { tf_executor.yield }
+    tf_executor.fetch %1, %2 : !tf_executor.control, !tf_executor.control
+  }
+  return
+}
+
+// CHECK:     %[[ISLAND:[0-9]*]] = tf_executor.island
+// CHECK-NOT: tf_executor.island
+// CHECK:     tf_executor.fetch %[[ISLAND]]
+

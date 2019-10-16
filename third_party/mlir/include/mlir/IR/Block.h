@@ -23,6 +23,7 @@
 #define MLIR_IR_BLOCK_H
 
 #include "mlir/IR/Value.h"
+#include "mlir/IR/Visitors.h"
 #include "llvm/ADT/PointerUnion.h"
 #include "llvm/ADT/ilist.h"
 #include "llvm/ADT/ilist_node.h"
@@ -92,12 +93,15 @@ public:
       operations.pop_back();
   }
 
-  /// Blocks are maintained in a Region.
-  Region *getParent();
+  /// Provide a 'getParent' method for ilist_node_with_parent methods.
+  /// We mark it as a const function because ilist_node_with_parent specifically
+  /// requires a 'getParent() const' method. Once ilist_node removes this
+  /// constraint, we should drop the const to fit the rest of the MLIR const
+  /// model.
+  Region *getParent() const;
 
-  /// Returns the closest surrounding operation that contains this block or
-  /// nullptr if this is a top-level block.
-  Operation *getContainingOp();
+  /// Returns the closest surrounding operation that contains this block.
+  Operation *getParentOp();
 
   /// Return if this block is the entry block in the parent region.
   bool isEntryBlock();
@@ -207,7 +211,7 @@ private:
         : llvm::filter_iterator<Block::iterator, bool (*)(Operation &)>(
               it, end, &filter) {}
 
-    /// Allow implict conversion to the underlying block iterator.
+    /// Allow implicit conversion to the underlying block iterator.
     operator Block::iterator() const { return this->wrapped(); }
   };
 
@@ -227,7 +231,7 @@ public:
         : llvm::mapped_iterator<op_filter_iterator<OpT>, OpT (*)(Operation &)>(
               it, &unwrap) {}
 
-    /// Allow implict conversion to the underlying block iterator.
+    /// Allow implicit conversion to the underlying block iterator.
     operator Block::iterator() const { return this->wrapped(); }
   };
 
@@ -290,20 +294,35 @@ public:
 
   /// Walk the operations in this block in postorder, calling the callback for
   /// each operation.
-  void walk(llvm::function_ref<void(Operation *)> callback);
-
-  /// Specialization of walk to only visit operations of 'OpTy'.
-  template <typename OpTy> void walk(llvm::function_ref<void(OpTy)> callback) {
-    walk([&](Operation *opInst) {
-      if (auto op = dyn_cast<OpTy>(opInst))
-        callback(op);
-    });
+  /// See Operation::walk for more details.
+  template <typename FnT, typename RetT = detail::walkResultType<FnT>>
+  RetT walk(FnT &&callback) {
+    return walk(begin(), end(), std::forward<FnT>(callback));
   }
 
   /// Walk the operations in the specified [begin, end) range of this block in
-  /// postorder, calling the callback for each operation.
-  void walk(Block::iterator begin, Block::iterator end,
-            llvm::function_ref<void(Operation *)> callback);
+  /// postorder, calling the callback for each operation. This method is invoked
+  /// for void return callbacks.
+  /// See Operation::walk for more details.
+  template <typename FnT, typename RetT = detail::walkResultType<FnT>>
+  typename std::enable_if<std::is_same<RetT, void>::value, RetT>::type
+  walk(Block::iterator begin, Block::iterator end, FnT &&callback) {
+    for (auto &op : llvm::make_early_inc_range(llvm::make_range(begin, end)))
+      detail::walkOperations(&op, callback);
+  }
+
+  /// Walk the operations in the specified [begin, end) range of this block in
+  /// postorder, calling the callback for each operation. This method is invoked
+  /// for interruptible callbacks.
+  /// See Operation::walk for more details.
+  template <typename FnT, typename RetT = detail::walkResultType<FnT>>
+  typename std::enable_if<std::is_same<RetT, WalkResult>::value, RetT>::type
+  walk(Block::iterator begin, Block::iterator end, FnT &&callback) {
+    for (auto &op : llvm::make_early_inc_range(llvm::make_range(begin, end)))
+      if (detail::walkOperations(&op, callback).wasInterrupted())
+        return WalkResult::interrupt();
+    return WalkResult::advance();
+  }
 
   //===--------------------------------------------------------------------===//
   // Other
@@ -373,7 +392,7 @@ struct ilist_traits<::mlir::Block> : public ilist_alloc_traits<::mlir::Block> {
                              block_iterator first, block_iterator last);
 
 private:
-  mlir::Region *getContainingRegion();
+  mlir::Region *getParentRegion();
 };
 } // end namespace llvm
 

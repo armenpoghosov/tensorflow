@@ -1,7 +1,7 @@
-load("//tensorflow/core:platform/default/build_config.bzl", "pyx_library")
-load("//tensorflow/compiler/xla:xla.bzl", "xla_python_default_plugins")
-load("//tensorflow:tensorflow.bzl", "tf_pybind_extension")
-load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/core/platform:default/build_config.bzl", "pyx_library")
+load("//tensorflow/compiler/xla:xla.bzl", "xla_py_test_deps", "xla_python_default_plugins")
+load("//tensorflow:tensorflow.bzl", "pybind_extension")
+load("//tensorflow:tensorflow.bzl", "py_test", "tf_cc_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
@@ -29,15 +29,14 @@ py_test(
     name = "xla_client_test",
     srcs = ["xla_client_test.py"],
     main = "xla_client_test.py",
-    python_version = "PY2",
     srcs_version = "PY2AND3",
-    tags = ["no_oss"],
+    tags = ["no_oss"],  # TODO(phawkins): This test passes, but requires --config=monolithic.
     deps = [
         ":custom_call_for_test",
         ":xla_client",
-        "//tensorflow/compiler/xla:xla_data_proto_py",
-        "//tensorflow/python:platform_test",
-    ],
+        ":xla_extension",
+        "@absl_py//absl/testing:absltest",
+    ] + xla_py_test_deps(),
 )
 
 cc_library(
@@ -57,7 +56,6 @@ cc_library(
     copts = [
         "-fexceptions",
         "-fno-strict-aliasing",
-        "-Wno-c++98-c++11-compat",
     ],
     features = ["-use_header_modules"],
     deps = [
@@ -70,6 +68,7 @@ cc_library(
         "//tensorflow/compiler/xla:xla_data_proto",
         "//tensorflow/core:lib",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:inlined_vector",
         "@com_google_absl//absl/types:optional",
         "@pybind11",
     ],
@@ -82,7 +81,6 @@ cc_library(
     copts = [
         "-fexceptions",
         "-fno-strict-aliasing",
-        "-Wno-c++98-c++11-compat",
     ],
     features = ["-use_header_modules"],
     deps = [
@@ -170,9 +168,9 @@ tf_cc_test(
 )
 
 cc_library(
-    name = "device",
-    srcs = ["device.cc"],
-    hdrs = ["device.h"],
+    name = "device_state",
+    srcs = ["device_state.cc"],
+    hdrs = ["device_state.h"],
     deps = [
         ":event_pool",
         ":semaphore",
@@ -191,7 +189,7 @@ cc_library(
     srcs = ["local_client.cc"],
     hdrs = ["local_client.h"],
     deps = [
-        ":device",
+        ":device_state",
         ":shared_device_buffer",
         "//tensorflow/compiler/xla:executable_run_options",
         "//tensorflow/compiler/xla:literal",
@@ -215,6 +213,7 @@ cc_library(
         "//tensorflow/core/profiler/lib:traceme",
         "//tensorflow/stream_executor:tf_allocator_adapter",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/time",
@@ -229,7 +228,6 @@ cc_library(
     copts = [
         "-fexceptions",
         "-fno-strict-aliasing",
-        "-Wno-c++98-c++11-compat",
     ],
     features = ["-use_header_modules"],
     deps = [
@@ -240,7 +238,7 @@ cc_library(
     ],
 )
 
-tf_pybind_extension(
+pybind_extension(
     name = "xla_extension",
     srcs = [
         "xla.cc",
@@ -248,7 +246,6 @@ tf_pybind_extension(
     copts = [
         "-fexceptions",
         "-fno-strict-aliasing",
-        "-Wno-c++98-c++11-compat",
     ],
     features = ["-use_header_modules"],
     module_name = "xla_extension",

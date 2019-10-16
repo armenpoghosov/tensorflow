@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/common_runtime/metrics.h"
+#include "tensorflow/core/framework/model.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/stats_aggregator.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -153,8 +154,9 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         ParallelInterleaveDatasetOp::kDatasetType, params);
   }
 
-  bool IsStateful() const override {
-    return captured_func_->IsStateful() || input_->IsStateful();
+  Status CheckExternalState() const override {
+    TF_RETURN_IF_ERROR(captured_func_->CheckExternalState());
+    return input_->CheckExternalState();
   }
 
  protected:
@@ -204,23 +206,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           num_parallel_calls_(std::make_shared<model::SharedState>(
               params.dataset->num_parallel_calls_, mu_, cond_var_)),
           sloppy_(sloppy),
-          current_elements_(params.dataset->cycle_length_) {
-      // The size of the threadpool is the smaller of:
-      //
-      // 1) The number of schedulable CPUs multiplied by a constant factor
-      //    factor to account for the fact that some threads may perform I/O.
-      //
-      // 2) The maximum number of iterators instantiated at any given point
-      //    in time (`cycle_length` for the current cycle elements and
-      //    `kPrefetchFactor * cycle_length` for future cycle elements).
-      const int num_threads =
-          std::min(static_cast<int>(kCPUFactor * port::NumSchedulableCPUs()),
-                   static_cast<int>((kPrefetchFactor + 1) *
-                                    params.dataset->cycle_length_));
-      thread_pool_ = absl::make_unique<thread::ThreadPool>(
-          Env::Default(), ThreadOptions(), kDataParallelInterleaveWorkerPool,
-          num_threads, /*low_latency_hint=*/false);
-    }
+          current_elements_(params.dataset->cycle_length_) {}
 
     ~ParallelInterleaveIterator() override {
       mutex_lock l(*mu_);
@@ -237,11 +223,34 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       // NOTE: We do not synchronize the following access to
       // num_parallel_calls_ to minimize the tracing overhead.
       int64 parallelism = num_parallel_calls_->value;
-      return strings::StrCat(prefix(), "#parallelism=", parallelism, "#");
+      return strings::StrCat(
+          prefix(), "#parallelism=", parallelism,
+          ",cycle_length=", dataset()->cycle_length_,
+          ",block_length=", dataset()->block_length_,
+          ",autotune=", dataset()->num_parallel_calls_ == model::kAutotune,
+          ",deterministic=", !sloppy_, "#");
     }
 
     Status Initialize(IteratorContext* ctx) override {
       mutex_lock l(*mu_);
+      // The size of the threadpool `num_threads` is the smaller of:
+      //
+      // 1) The number of schedulable CPUs multiplied by a constant factor
+      //    factor to account for the fact that some threads may perform I/O.
+      //
+      // 2) The maximum number of iterators instantiated at any given point
+      //    in time (`cycle_length` for the current cycle elements and
+      //    `kPrefetchFactor * cycle_length` for future cycle elements).
+      //
+      // Note that if `ctx->thread_pool()` is non-null, then instead of creating
+      // a dedicated thread pool of size `num_threads`, computation will be
+      // scheduled into the shared threadpool whose size is independent of
+      // `num_threads`.
+      const int num_threads = std::min(
+          static_cast<int>(kCPUFactor * port::NumSchedulableCPUs()),
+          static_cast<int>((kPrefetchFactor + 1) * dataset()->cycle_length_));
+      thread_pool_ =
+          ctx->CreateThreadPool(kDataParallelInterleaveWorkerPool, num_threads);
       if (num_parallel_calls_->value == model::kAutotune) {
         num_parallel_calls_->value = dataset()->cycle_length_;
       }
@@ -347,9 +356,8 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       std::vector<Tensor> inputs;
       // Iterator created from the input element.
       std::unique_ptr<IteratorBase> iterator;
-      mutex mu;
-      // Buffer for storing the outputs of `iterator`.
-      std::deque<std::shared_ptr<Result>> results GUARDED_BY(mu);
+      // Buffer for storing the outputs of `iterator`. Guarded by `*mu_`.
+      std::deque<std::shared_ptr<Result>> results;
       // Indicates whether the element is used by a worker thread.
       bool in_use = false;
     };
@@ -393,7 +401,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       while (true) {
         std::shared_ptr<Element> element = current_elements_[cycle_index_];
         if (element) {
-          mutex_lock l(element->mu);
           if (!element->results.empty()) {
             if (element->results.front()->is_ready) {
               // We found a result.
@@ -458,7 +465,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
               break;
             }
           } else {
-            mutex_lock l(element->mu);
             if (!element->in_use && element->iterator &&
                 element->results.size() < block_length) {
               all_elements_busy = false;
@@ -506,7 +512,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           if (!element->in_use && element->iterator) {
             int64 num_results;
             {
-              mutex_lock l(element->mu);
               num_results = dataset()->block_length_ - element->results.size();
             }
             if (num_results > 0) {
@@ -564,7 +569,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
                       int64 num_results, std::function<void()> done)
         LOCKS_EXCLUDED(*mu_) {
       RecordStart(ctx.get());
-      auto cleanup = gtl::MakeCleanup([this, ctx] { RecordStop(ctx.get()); });
       bool end_of_input = false;
       for (int64 i = 0; i < num_results; ++i) {
         auto result = std::make_shared<Result>();
@@ -575,7 +579,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         }
         RecordBufferEnqueue(ctx.get(), result->return_values);
         mutex_lock l(*mu_);
-        mutex_lock l2(element->mu);
         element->results.push_back(result);
         result->is_ready = true;
         cond_var_->notify_all();
@@ -592,6 +595,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       }
       done();
       cond_var_->notify_all();
+      RecordStop(ctx.get());
     }
 
     // Manages futures cycle elements, creating new iterators as needed and
@@ -656,7 +660,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         auto result = std::make_shared<Result>();
         result->is_ready = true;
         result->status = status;
-        mutex_lock l(element->mu);
         element->results.push_back(std::move(result));
         return element;
       }
@@ -668,7 +671,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
           auto result = std::make_shared<Result>();
           result->is_ready = true;
           result->status = status;
-          mutex_lock l(element->mu);
           element->results.push_back(std::move(result));
           return element;
         }
@@ -701,7 +703,7 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
       error::Code code = static_cast<error::Code>(code_int);
 
       if (code != error::Code::OK) {
-        string error_message;
+        tstring error_message;
         TF_RETURN_IF_ERROR(reader->ReadScalar(ErrorMessageKey(key_prefix, idx),
                                               &error_message));
         *status = Status(code, error_message);
@@ -740,7 +742,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
               element->inputs[i]));
         }
       }
-      mutex_lock l(element->mu);
       TF_RETURN_IF_ERROR(writer->WriteScalar(
           full_name(strings::StrCat(key_prefix, "[", idx, "]", kResultsSuffix,
                                     kSizeSuffix)),
@@ -806,7 +807,6 @@ class ParallelInterleaveDatasetOp::Dataset : public DatasetBase {
         return Status::OK();
       }
       auto element = std::make_shared<Element>();
-      mutex_lock l(element->mu);
       int64 results_size;
       TF_RETURN_IF_ERROR(reader->ReadScalar(
           full_name(strings::StrCat(key_prefix, "[", idx, "]", kResultsSuffix,

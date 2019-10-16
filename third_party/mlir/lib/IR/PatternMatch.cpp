@@ -16,6 +16,7 @@
 // =============================================================================
 
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/BlockAndValueMapping.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/Value.h"
 using namespace mlir;
@@ -91,8 +92,7 @@ void PatternRewriter::replaceOp(Operation *op, ArrayRef<Value *> newValues,
 
   assert(op->getNumResults() == newValues.size() &&
          "incorrect # of replacement values");
-  for (unsigned i = 0, e = newValues.size(); i != e; ++i)
-    op->getResult(i)->replaceAllUsesWith(newValues[i]);
+  op->replaceAllUsesWith(newValues);
 
   notifyOperationRemoved(op);
   op->erase();
@@ -127,6 +127,24 @@ void PatternRewriter::inlineRegionBefore(Region &region, Block *before) {
   inlineRegionBefore(region, *before->getParent(), before->getIterator());
 }
 
+/// Clone the blocks that belong to "region" before the given position in
+/// another region "parent". The two regions must be different. The caller is
+/// responsible for creating or updating the operation transferring flow of
+/// control to the region and passing it the correct block arguments.
+void PatternRewriter::cloneRegionBefore(Region &region, Region &parent,
+                                        Region::iterator before,
+                                        BlockAndValueMapping &mapping) {
+  region.cloneInto(&parent, before, mapping);
+}
+void PatternRewriter::cloneRegionBefore(Region &region, Region &parent,
+                                        Region::iterator before) {
+  BlockAndValueMapping mapping;
+  cloneRegionBefore(region, parent, before, mapping);
+}
+void PatternRewriter::cloneRegionBefore(Region &region, Block *before) {
+  cloneRegionBefore(region, *before->getParent(), before->getIterator());
+}
+
 /// This method is used as the final notification hook for patterns that end
 /// up modifying the pattern root in place, by changing its operands.  This is
 /// a minor efficiency win (it avoids creating a new operation and removing
@@ -149,12 +167,13 @@ void PatternRewriter::updatedRootInPlace(
 //===----------------------------------------------------------------------===//
 
 RewritePatternMatcher::RewritePatternMatcher(
-    OwningRewritePatternList &&patterns)
-    : patterns(std::move(patterns)) {
+    const OwningRewritePatternList &patterns) {
+  for (auto &pattern : patterns)
+    this->patterns.push_back(pattern.get());
+
   // Sort the patterns by benefit to simplify the matching logic.
   std::stable_sort(this->patterns.begin(), this->patterns.end(),
-                   [](const std::unique_ptr<RewritePattern> &l,
-                      const std::unique_ptr<RewritePattern> &r) {
+                   [](RewritePattern *l, RewritePattern *r) {
                      return r->getBenefit() < l->getBenefit();
                    });
 }
@@ -162,7 +181,7 @@ RewritePatternMatcher::RewritePatternMatcher(
 /// Try to match the given operation to a pattern and rewrite it.
 bool RewritePatternMatcher::matchAndRewrite(Operation *op,
                                             PatternRewriter &rewriter) {
-  for (auto &pattern : patterns) {
+  for (auto *pattern : patterns) {
     // Ignore patterns that are for the wrong root or are impossible to match.
     if (pattern->getRootKind() != op->getName() ||
         pattern->getBenefit().isImpossibleToMatch())
