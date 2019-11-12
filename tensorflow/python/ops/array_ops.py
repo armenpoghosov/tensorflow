@@ -867,8 +867,10 @@ def _slice_helper(tensor, slice_spec, var=None):
     index += 1
 
   # stack possibly involves no tensors, so we must use op_scope correct graph.
-  with ops.name_scope(None, "strided_slice",
-                      [tensor] + begin + end + strides) as name:
+  with ops.name_scope(
+      None,
+      "strided_slice", [tensor] + begin + end + strides,
+      skip_on_eager=False) as name:
     if begin:
       packed_begin, packed_end, packed_strides = (stack(begin), stack(end),
                                                   stack(strides))
@@ -4024,7 +4026,7 @@ def gather(params,
            name=None,
            axis=None,
            batch_dims=0):  # pylint: disable=g-doc-args
-  r"""Gather slices from params axis axis according to indices.
+  r"""Gather slices from params axis `axis` according to indices.
 
   Gather slices from params axis `axis` according to `indices`.  `indices` must
   be an integer tensor of any dimension (usually 0-D or 1-D).
@@ -4420,14 +4422,11 @@ def gather_nd(params, indices, name=None, batch_dims=0):
   if batch_dims_ is not None:
     batch_dims = int(batch_dims_)
   if batch_dims == 0:
-    if compat.forward_compatible(2019, 4, 29):
-      try:
-        # TODO(apassos) find a less bad way of detecting resource variables
-        # without introducing a circular dependency.
-        return params.gather_nd(indices, name=name)
-      except AttributeError:
-        return gen_array_ops.gather_nd(params, indices, name=name)
-    else:
+    try:
+      # TODO(apassos) find a less bad way of detecting resource variables
+      # without introducing a circular dependency.
+      return params.gather_nd(indices, name=name)
+    except AttributeError:
       return gen_array_ops.gather_nd(params, indices, name=name)
   else:
     return batch_gather_nd(params, indices, batch_dims=batch_dims, name=name)
@@ -4689,29 +4688,17 @@ def quantize_and_dequantize(
       raise ValueError("input should have known rank to use negative axis.")
     axis %= input.shape.ndims
 
-  if compat.forward_compatible(2019, 9, 25) or axis >= 0:
-    return gen_array_ops.quantize_and_dequantize_v2(
-        input,
-        input_min=input_min,
-        input_max=input_max,
-        signed_input=signed_input,
-        num_bits=num_bits,
-        range_given=range_given,
-        round_mode=round_mode,
-        narrow_range=narrow_range,
-        axis=axis,
-        name=name)
-  else:
-    return gen_array_ops.quantize_and_dequantize_v2(
-        input,
-        input_min=input_min,
-        input_max=input_max,
-        signed_input=signed_input,
-        num_bits=num_bits,
-        range_given=range_given,
-        round_mode=round_mode,
-        narrow_range=narrow_range,
-        name=name)
+  return gen_array_ops.quantize_and_dequantize_v2(
+      input,
+      input_min=input_min,
+      input_max=input_max,
+      signed_input=signed_input,
+      num_bits=num_bits,
+      range_given=range_given,
+      round_mode=round_mode,
+      narrow_range=narrow_range,
+      axis=axis,
+      name=name)
 
 
 @tf_export("searchsorted")

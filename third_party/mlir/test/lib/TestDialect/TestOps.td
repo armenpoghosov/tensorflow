@@ -15,8 +15,7 @@
 // limitations under the License.
 // =============================================================================
 
-#ifdef TEST_OPS
-#else
+#ifndef TEST_OPS
 #define TEST_OPS
 
 include "mlir/IR/OpBase.td"
@@ -80,6 +79,16 @@ def MultiTensorRankOf : TEST_Op<"multi_tensor_rank_of"> {
   let arguments = (ins
     TensorRankOf<[I8, I32, F32], [0, 1]>:$arg0
   );
+}
+
+//===----------------------------------------------------------------------===//
+// Test Operands
+//===----------------------------------------------------------------------===//
+
+def SymbolScopeOp : TEST_Op<"symbol_scope",
+    [SymbolTable, SingleBlockImplicitTerminator<"TerminatorOp">]> {
+  let summary =  "operation which defines a new symbol table";
+  let regions = (region SizedRegion<1>:$region);
 }
 
 //===----------------------------------------------------------------------===//
@@ -192,6 +201,16 @@ def UpdateFloatElementsAttr : Pat<
     $f64attr)>;
 
 //===----------------------------------------------------------------------===//
+// Test Attribute Constraints
+//===----------------------------------------------------------------------===//
+
+def SymbolRefOp : TEST_Op<"symbol_ref_attr"> {
+  let arguments = (ins
+    Confined<FlatSymbolRefAttr, [ReferToOp<"FuncOp">]>:$symbol
+  );
+}
+
+//===----------------------------------------------------------------------===//
 // Test Regions
 //===----------------------------------------------------------------------===//
 
@@ -213,7 +232,7 @@ def SizedRegionOp : TEST_Op<"sized_region_op", []> {
 
 def ConversionCallOp : TEST_Op<"conversion_call_op",
     [CallOpInterface]> {
-  let arguments = (ins Variadic<AnyType>:$inputs, SymbolRefAttr:$callee);
+  let arguments = (ins Variadic<AnyType>:$inputs, FlatSymbolRefAttr:$callee);
   let results = (outs Variadic<AnyType>);
 
   let extraClassDeclaration = [{
@@ -222,7 +241,7 @@ def ConversionCallOp : TEST_Op<"conversion_call_op",
 
     /// Return the callee of this operation.
     CallInterfaceCallable getCallableForCallee() {
-      return getAttrOfType<SymbolRefAttr>("callee");
+      return getAttrOfType<FlatSymbolRefAttr>("callee");
     }
   }];
 }
@@ -376,8 +395,9 @@ def I32ElementsAttrOp : TEST_Op<"i32ElementsAttr"> {
   let arguments = (ins I32ElementsAttr:$attr);
 }
 
-def OpWithInferTypeInterfaceOp : TEST_Op<"op_with_infer_type_if",
-    [DeclareOpInterfaceMethods<InferTypeOpInterface>]> {
+def OpWithInferTypeInterfaceOp : TEST_Op<"op_with_infer_type_if", [
+    DeclareOpInterfaceMethods<InferTypeOpInterface>,
+    InferTypeOpInterfaceDefault]> {
   let arguments = (ins AnyTensor, AnyTensor);
   let results = (outs AnyTensor);
 }

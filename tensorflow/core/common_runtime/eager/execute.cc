@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/eager/execute.h"
 
+#include <cstddef>
 #include <vector>
 
 // clang-format off
@@ -39,6 +40,7 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/eager/tensor_handle.h"
 #include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
 #include "tensorflow/core/common_runtime/colocation_graph.h"
+#include "tensorflow/core/framework/dataset.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/logging.h"
 #include "tensorflow/core/framework/node_def_util.h"
@@ -52,6 +54,7 @@ limitations under the License.
 #include "tensorflow/core/distributed_runtime/eager/remote_copy_node.h"
 #include "tensorflow/core/distributed_runtime/eager/remote_mgr.h"
 #include "tensorflow/core/distributed_runtime/eager/remote_execute_node.h"
+#include "tensorflow/core/protobuf/remote_tensor_handle.pb.h"
 #endif  // IS_MOBILE_PLATFORM
 #include "tensorflow/core/framework/step_stats.pb.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -178,7 +181,12 @@ Status CopyInputToExpectedDevice(EagerContext* ctx, EagerOperation* op,
   // We are only here if the policy is warn or silent copies, so we should
   // trigger a copy.
   TensorHandle* result_handle = nullptr;
-  profiler::TraceMe activity("_Send", profiler::TraceMeLevel::kInfo);
+  profiler::TraceMe activity(
+      [&] {
+        return absl::StrCat("_Send input ", i, " from ", handle_device->name(),
+                            " to ", expected_input_device->name());
+      },
+      profiler::TraceMeLevel::kInfo);
   Status status =
       EagerCopyToDevice(handle, ctx, &op->Executor(), expected_input_device,
                         ctx->MirrorTensors(), &result_handle);
@@ -209,7 +217,7 @@ Status ValidateInputTypeAndPlacement(
                                    " inputs, got ", n_inputs);
   }
   const bool skip_remote_copy =
-      ctx->LazilyCopyFunctionRemoteInputs() && kernel->IsFunction();
+      ctx->LazyCopyFunctionRemoteInputs() && kernel->IsFunction();
   for (int i = 0; i < n_inputs; ++i) {
     TensorHandle* handle = op->Inputs()[i];
     Device* expected_device = kernel->InputDevice(i);
@@ -411,6 +419,14 @@ Status ShouldCompileWithXLA(const EagerOperation* op, const EagerContext* ctx,
     return Status::OK();
   }
 
+  if (op->remote_func_params().has_value() &&
+      op->remote_func_params().value().step_id.has_value()) {
+    // If the op is a component of a multi-device function, don't compile it
+    // with XLA.
+    *compile_with_xla = false;
+    return Status::OK();
+  }
+
   // Does node have an explicit request to compile or not?
   Status status = op->Attrs().Get(kXlaCompileAttr, compile_with_xla);
   if (status.ok()) {
@@ -488,14 +504,12 @@ Status EagerLocalExecute(EagerOperation* op, TensorHandle** retvals,
     profiler::TraceMe activity("EagerCopyToDeviceAndAddCacheKey",
                                profiler::TraceMeLevel::kInfo);
     input_dev_ptrs.reserve(op->Inputs().size());
-    // When LazilyCopyFunctionRemoteInputs is disabled, all inputs need to be on
+    // When LazyCopyFunctionRemoteInputs is disabled, all inputs need to be on
     // local devices, since we execute a remote function through worker service,
     // which doesn't accept remote inputs.
-    // TODO(b/134094971): Make resource_dtypes_and_shapes avaliable without
-    // remote tensor copy.
     for (int i = 0; i < op->Inputs().size(); i++) {
       TensorHandle* input = op->Inputs()[i];
-      if (!ctx->LazilyCopyFunctionRemoteInputs() && input->IsRemote()) {
+      if (!ctx->LazyCopyFunctionRemoteInputs() && input->IsRemote()) {
         TensorHandle* handle = nullptr;
         TF_RETURN_IF_ERROR(EagerCopyToDevice(
             input, ctx, &executor, device == nullptr ? ctx->HostCPU() : device,
@@ -592,7 +606,7 @@ Status EagerLocalExecute(EagerOperation* op, TensorHandle** retvals,
                << ". Full node_def=" << ndef.DebugString();
       std::function<int64()> get_op_id = nullptr;
 #if !defined(IS_MOBILE_PLATFORM)
-      if (ctx->LazilyCopyFunctionRemoteInputs()) {
+      if (ctx->LazyCopyFunctionRemoteInputs()) {
         get_op_id = [ctx]() { return ctx->RemoteMgr()->NextOpId(); };
       }
 #endif  // IS_MOBILE_PLATFORM
@@ -614,7 +628,21 @@ Status EagerLocalExecute(EagerOperation* op, TensorHandle** retvals,
 
     TF_RETURN_IF_ERROR(kernel->Init(ndef, graph_collector));
 
-    ctx->AddKernelToCache(cache_key, kernel.get());
+    if (op->is_function()) {
+      ctx->AddKernelToCache(cache_key, kernel.get());
+    } else {
+      // Exclude tf.data op kernels from being cached. The reason for this is
+      // that tf.data op kernels that accept a user-defined function will have a
+      // unique cache key every time they are executed (because the user-defined
+      // function is traced every time). Caching such kernels provides no
+      // benefit and in some cases results in linear memory growth of use
+      // programs that build input pipeline graphs in a loop.
+      const OpDef* op_def;
+      TF_RETURN_IF_ERROR(OpDefForOp(op->Name().data(), &op_def));
+      if (!data::DatasetOpKernel::IsDatasetOp(op_def)) {
+        ctx->AddKernelToCache(cache_key, kernel.get());
+      }
+    }
   }
   const DataTypeVector& output_dtypes = kernel->output_dtypes();
   const size_t num_outputs = static_cast<int>(output_dtypes.size());
@@ -668,6 +696,29 @@ void PrepareRemoteOp(eager::Operation* remote_op, EagerOperation* op) {
 
   op->Attrs().FillAttrValueMapWithoutDefaults(remote_op->mutable_attrs());
   remote_op->set_device(op->Device()->name());
+  remote_op->set_is_function(op->is_function());
+}
+
+Status StoreResourceDtypesAndShapes(const eager::Operation& remote_op,
+                                    const DataTypeVector& output_dtypes,
+                                    TensorHandle** retvals) {
+  if (remote_op.name() == "VarHandleOp") {
+    if (output_dtypes.size() != 1) {
+      return errors::Internal("VarHandleOp should only have one output.");
+    }
+    if (output_dtypes[0] != DT_RESOURCE) {
+      return errors::Internal(
+          "The output of VarHandleOp should be a DT_RESOURCE.");
+    }
+    AttrSlice attr_slice = AttrSlice(&remote_op.attrs());
+    const AttrValue* dtype;
+    TF_RETURN_IF_ERROR(attr_slice.Find("dtype", &dtype));
+    const AttrValue* shape;
+    TF_RETURN_IF_ERROR(attr_slice.Find("shape", &shape));
+    retvals[0]->SetResourceHandleDtypeAndShape(
+        {DtypeAndPartialTensorShape{dtype->type(), shape->shape()}});
+  }
+  return Status::OK();
 }
 
 Status EagerRemoteExecute(EagerOperation* op, TensorHandle** retvals,
@@ -702,44 +753,48 @@ Status EagerRemoteExecute(EagerOperation* op, TensorHandle** retvals,
     profiler::TraceMe activity("CopyInputToExpectedDevice",
                                profiler::TraceMeLevel::kInfo);
     const bool eagerly_copy_function_remote_inputs =
-        !ctx->LazilyCopyFunctionRemoteInputs() || !op->is_function();
+        !ctx->LazyCopyFunctionRemoteInputs() || !op->is_function();
     for (int i = 0; i < op->Inputs().size(); i++) {
       tensorflow::TensorHandle* input = op->Inputs()[i];
       tensorflow::Device* input_device = input->device();
       const string* input_device_name = &input->DeviceOrHostCPU(ctx)->name();
-      const bool maybe_copy = eagerly_copy_function_remote_inputs ||
-                              input->DeviceOrHostCPU(ctx)->IsLocal();
-      if (maybe_copy && op->Device() != input_device &&
+      bool serialize_resource_dtype_and_shape = false;
+      if (op->Device() != input_device &&
           // If the expected and actual devices are on the same task, don't
           // explicitly copy, and instead depend on the copy to happen locally
           // when the op is executed on the device.
           !ctx->OnSameTask(op->Device(), input_device)) {
-        tensorflow::Device* remote_cpu_device;
-        TF_RETURN_IF_ERROR(
-            ctx->CPUDeviceOnTask(op->Device(), &remote_cpu_device));
-        // TODO(b/110044833): It's possible the same tensor gets copied to the
-        // remote device repeatedly.
-        // Always copy to the remote CPU so that the actual device can be
-        // correctly determined after the kernel is selected/instantiated, since
-        // the op might have its inputs on host memory.
-        TensorHandle* handle = op->Inputs()[i];
-        Device* handle_device = handle->DeviceOrHostCPU(ctx);
-        // If the input is already on the right device, then nothing to do.
-        if (remote_cpu_device != handle_device) {
-          TF_RETURN_IF_ERROR(CopyInputToExpectedDevice(
-              ctx, op, op->Device(), handle, i, handle_device,
-              remote_cpu_device, &handle));
-          op->UpdateInput(i, handle);
-          input = handle;
-          input_device = remote_cpu_device;
-          input_device_name = &remote_cpu_device->name();
-          // Unref handle since it has a ref as an input now
-          handle->Unref();
+        if (eagerly_copy_function_remote_inputs ||
+            input->DeviceOrHostCPU(ctx)->IsLocal()) {
+          tensorflow::Device* remote_cpu_device;
+          TF_RETURN_IF_ERROR(
+              ctx->CPUDeviceOnTask(op->Device(), &remote_cpu_device));
+          // TODO(b/110044833): It's possible the same tensor gets copied to the
+          // remote device repeatedly.
+          // Always copy to the remote CPU so that the actual device can be
+          // correctly determined after the kernel is selected/instantiated,
+          // since the op might have its inputs on host memory.
+          TensorHandle* handle = op->Inputs()[i];
+          Device* handle_device = handle->DeviceOrHostCPU(ctx);
+          // If the input is already on the right device, then nothing to do.
+          if (remote_cpu_device != handle_device) {
+            TF_RETURN_IF_ERROR(CopyInputToExpectedDevice(
+                ctx, op, op->Device(), handle, i, handle_device,
+                remote_cpu_device, &handle));
+            op->UpdateInput(i, handle);
+            input = handle;
+            input_device = remote_cpu_device;
+            input_device_name = &remote_cpu_device->name();
+            // Unref handle since it has a ref as an input now
+            handle->Unref();
+          }
+        } else {
+          serialize_resource_dtype_and_shape = input->dtype == DT_RESOURCE;
         }
       }
-
       TF_RETURN_IF_ERROR(ctx->RemoteMgr()->SerializeRemoteTensorHandle(
-          input, remote_op->add_inputs(), input_device, *input_device_name));
+          input, remote_op->add_inputs(), input_device, *input_device_name,
+          serialize_resource_dtype_and_shape));
     }
   }
 
@@ -780,6 +835,20 @@ Status EagerRemoteExecute(EagerOperation* op, TensorHandle** retvals,
       }
       return status;
     }
+  }
+
+  if (ctx->LazyCopyFunctionRemoteInputs()) {
+    // Store the data type and shape of a remote resource variable on the
+    // corresponding remote TensorHandle (output of 'VarHandleOp').
+    // If the variable is an input of a remote function, the function may need
+    // the type and shape during function instantiation. When
+    // LazyCopyFunctionRemoteInputs is enabled, we no longer copy the resource
+    // handle (contains the type and shape) of the variable to the default
+    // function device. Instead, we store the type and shape on eager master
+    // and sent them to the default function device along with the
+    // EnqueueRequest.
+    TF_RETURN_IF_ERROR(
+        StoreResourceDtypesAndShapes(*remote_op, output_dtypes, retvals));
   }
 
   auto& executor = op->Executor();

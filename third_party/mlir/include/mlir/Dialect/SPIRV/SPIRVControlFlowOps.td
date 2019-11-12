@@ -20,17 +20,14 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef SPIRV_CONTROLFLOW_OPS
-#else
+#ifndef SPIRV_CONTROLFLOW_OPS
 #define SPIRV_CONTROLFLOW_OPS
 
-#ifdef SPIRV_BASE
-#else
+#ifndef SPIRV_BASE
 include "mlir/SPIRV/SPIRVBase.td"
 #endif // SPIRV_BASE
 
-#ifdef MLIR_CALLINTERFACES
-#else
+#ifndef MLIR_CALLINTERFACES
 include "mlir/Analysis/CallInterfaces.td"
 #endif // MLIR_CALLINTERFACES
 
@@ -253,7 +250,7 @@ def SPV_FunctionCallOp : SPV_Op<"FunctionCall", [
   }];
 
   let arguments = (ins
-    SymbolRefAttr:$callee,
+    FlatSymbolRefAttr:$callee,
     Variadic<SPV_Type>:$arguments
   );
 
