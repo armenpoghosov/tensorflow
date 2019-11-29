@@ -11,6 +11,7 @@ package_group(
     includes = ["@local_config_mlir//:subpackages"],
     packages = [
         "//tensorflow/compiler/...",
+        "//tensorflow/core/tfrt_delegate/...",
         "//tensorflow/python/...",
     ],
 )
@@ -216,7 +217,9 @@ cc_library(
         "transforms/shape_inference.cc",
         "transforms/shape_inference_pass.cc",
         "transforms/sink_constant.cc",
+        "transforms/test_side_effect_analysis.cc",
         "transforms/tpu_cluster_formation.cc",
+        "transforms/tpu_merge_variables_with_execute.cc",
         "transforms/tpu_rewrite_pass.cc",
         "translate/breakup-islands.cc",
         "translate/control_to_executor_dialect.cc",
@@ -230,12 +233,14 @@ cc_library(
     ],
     includes = ["include"],
     deps = [
+        ":bridge_logger",
         ":convert_tensor",
         ":convert_type",
         ":device_util",
         ":error_util",
         ":export_tf_dialect_op",
         ":mangling_util",
+        ":side_effect_analysis",
         ":tensorflow",
         ":tensorflow_optimize_inc_gen",
         ":tpu_rewrite_device_util",
@@ -305,7 +310,7 @@ cc_library(
         ":mlir_roundtrip_flags",
         ":tensorflow",
         ":tensorflow_passes",
-        "//tensorflow/cc/saved_model:loader_lite",
+        "//tensorflow/cc/saved_model:bundle_v2",
         "//tensorflow/compiler/jit:shape_inference_helpers",
         "//tensorflow/compiler/mlir:op_or_arg_name_mapper",
         "//tensorflow/compiler/tf2xla:functionalize_control_flow",
@@ -487,6 +492,22 @@ cc_library(
         "@llvm//:support",
         "@local_config_mlir//:IR",
         "@local_config_mlir//:Support",
+    ],
+)
+
+tf_cc_test(
+    name = "convert_type_test",
+    size = "small",
+    srcs = ["utils/convert_type_test.cc"],
+    deps = [
+        ":convert_type",
+        "//tensorflow/compiler/xla:test",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/stream_executor/lib",
+        "@llvm//:support",
+        "@local_config_mlir//:IR",
     ],
 )
 
@@ -772,6 +793,7 @@ cc_library(
     hdrs = ["utils/compile_mlir_util.h"],
     deps = [
         ":convert_type",
+        ":dump_mlir_util",
         ":error_util",
         ":tensorflow_passes",
         ":tf_dialect_passes",
@@ -782,12 +804,16 @@ cc_library(
         "//tensorflow/compiler/tf2xla:common",
         "//tensorflow/compiler/tf2xla:xla_compiler",
         "//tensorflow/core:framework",
+        "//tensorflow/core/platform:logging",
         "//tensorflow/stream_executor/lib",
         "@com_google_absl//absl/types:span",
         "@llvm//:support",
         "@local_config_mlir//:IR",
         "@local_config_mlir//:Parser",
+        "@local_config_mlir//:Pass",
         "@local_config_mlir//:StandardOps",
+        "@local_config_mlir//:TransformUtils",
+        "@local_config_mlir//:Transforms",
     ],
 )
 
@@ -915,6 +941,61 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "@llvm//:support",
         "@local_config_mlir//:IR",
+        "@local_config_mlir//:Support",
+    ],
+)
+
+cc_library(
+    name = "dump_mlir_util",
+    srcs = ["utils/dump_mlir_util.cc"],
+    hdrs = ["utils/dump_mlir_util.h"],
+    deps = [
+        "//tensorflow/core:lib",
+        "//tensorflow/core/platform:logging",
+        "@llvm//:support",
+        "@local_config_mlir//:IR",
+    ],
+)
+
+tf_cc_test(
+    name = "dump_mlir_util_test",
+    size = "small",
+    srcs = ["utils/dump_mlir_util_test.cc"],
+    deps = [
+        ":dump_mlir_util",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:test",
+        "@llvm//:support",
+        "@local_config_mlir//:IR",
+    ],
+)
+
+cc_library(
+    name = "bridge_logger",
+    srcs = ["utils/bridge_logger.cc"],
+    hdrs = ["utils/bridge_logger.h"],
+    deps = [
+        ":dump_mlir_util",
+        "@llvm//:support",
+        "@local_config_mlir//:IR",
+        "@local_config_mlir//:Pass",
+    ],
+)
+
+cc_library(
+    name = "side_effect_analysis",
+    srcs = ["analysis/side_effect_analysis.cc"],
+    hdrs = ["analysis/side_effect_analysis.h"],
+    deps = [
+        ":tensorflow",
+        "//tensorflow/compiler/tf2xla:resource_operation_table",
+        "//tensorflow/core:framework",
+        "@com_google_absl//absl/strings",
+        "@llvm//:support",
+        "@local_config_mlir//:IR",
+        "@local_config_mlir//:Pass",
         "@local_config_mlir//:Support",
     ],
 )

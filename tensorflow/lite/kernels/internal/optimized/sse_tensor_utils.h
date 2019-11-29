@@ -167,6 +167,14 @@ void VectorVectorCwiseProduct(const float* vector1, const float* vector2,
   NEON_OR_PORTABLE(VectorVectorCwiseProduct, vector1, vector2, v_size, result);
 }
 
+void BatchVectorBatchVectorDotProduct(const int16_t* vector1,
+                                      const int16_t* vector2, int v_size,
+                                      int n_batch, int32_t* result,
+                                      int result_stride) {
+  return PortableBatchVectorBatchVectorDotProduct(
+      vector1, vector2, v_size, n_batch, result, result_stride);
+}
+
 void VectorVectorCwiseProductAccumulate(const float* vector1,
                                         const float* vector2, int v_size,
                                         float* result) {
@@ -198,15 +206,6 @@ void VectorBatchVectorAdd(const float* vector, int v_size, int n_batch,
   PortableVectorBatchVectorAdd(vector, v_size, n_batch, batch_vector);
 }
 
-void ApplySigmoidToVector(const float* vector, int v_size, float* result) {
-  PortableApplySigmoidToVector(vector, v_size, result);
-}
-
-void ApplyActivationToVector(const float* vector, int v_size,
-                             TfLiteFusedActivation activation, float* result) {
-  PortableApplyActivationToVector(vector, v_size, activation, result);
-}
-
 void Sub1Vector(const float* vector, int v_size, float* result) {
   NEON_OR_PORTABLE(Sub1Vector, vector, v_size, result);
 }
@@ -214,8 +213,6 @@ void Sub1Vector(const float* vector, int v_size, float* result) {
 void Sub1Vector(const int16_t* vector, int v_size, int16_t* result) {
   PortableSub1Vector(vector, v_size, result);
 }
-
-float Clip(float f, float abs_limit) { return PortableClip(f, abs_limit); }
 
 // Check if all entries of a vector are zero for float.
 bool IsZeroVector(const float* vector, int v_size) {
@@ -261,6 +258,12 @@ void ReductionSumVector(const float* input_vector, float* output_vector,
                         int output_size, int reduction_size) {
   NEON_OR_PORTABLE(ReductionSumVector, input_vector, output_vector, output_size,
                    reduction_size);
+}
+
+void ReductionSumVector(const int32_t* input_vector, int32_t* output_vector,
+                        int output_size, int reduction_size) {
+  PortableReductionSumVector(input_vector, output_vector, output_size,
+                             reduction_size);
 }
 
 void MeanStddevNormalization(const float* input_vector, float* output_vector,

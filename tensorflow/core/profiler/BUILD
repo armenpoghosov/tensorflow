@@ -1,5 +1,5 @@
 load("//tensorflow:tensorflow.bzl", "tf_cc_binary")
-load("//tensorflow/core/platform:default/build_config.bzl", "tf_additional_all_protos", "tf_proto_library")
+load("//tensorflow/core/platform:build_config.bzl", "tf_additional_all_protos", "tf_proto_library")
 
 package(
     default_visibility = ["//tensorflow:internal"],
@@ -45,6 +45,7 @@ tf_proto_library(
         ":op_profile_proto",
         ":profiler_service_monitor_result_proto",
     ] + tf_additional_all_protos(),
+    use_grpc_namespace = True,
     visibility = ["//visibility:public"],
 )
 
@@ -55,20 +56,18 @@ tf_proto_library(
     cc_api_version = 2,
     cc_grpc_version = 1,
     protodeps = [":profiler_service_proto"],
+    use_grpc_namespace = True,
     visibility = ["//visibility:public"],
 )
 
 tf_proto_library(
     name = "protos_all",
-    srcs = glob(
-        ["**/*.proto"],
-        exclude = [
-            "profiler_service.proto",
-            "profiler_analysis.proto",
-            "op_profile.proto",
-            "profiler_service_monitor_result.proto",
-        ],
-    ),
+    srcs = [
+        "profile.proto",
+        "tfprof_log.proto",
+        "tfprof_options.proto",
+        "tfprof_output.proto",
+    ],
     cc_api_version = 2,
     protodeps = tf_additional_all_protos(),
     visibility = [":friends"],
@@ -113,5 +112,5 @@ filegroup(
         "//tensorflow/core/profiler/internal:mobile_srcs",
         "//tensorflow/core/profiler/lib:mobile_srcs",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//tensorflow/core:__pkg__"],
 )

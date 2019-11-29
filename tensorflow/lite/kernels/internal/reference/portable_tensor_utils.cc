@@ -14,17 +14,18 @@ limitations under the License.
 ==============================================================================*/
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
+#include <cstdint>
 #include <cstring>
+#include <limits>
+#include <utility>
 
+#include "fixedpoint/fixedpoint.h"
 #include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/kernels/activation_functor.h"
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
 #include "tensorflow/lite/kernels/internal/common.h"
 #include "tensorflow/lite/kernels/internal/compatibility.h"
 #include "tensorflow/lite/kernels/internal/reference/portable_tensor_utils_impl.h"
 #include "tensorflow/lite/kernels/internal/round.h"
-#include "tensorflow/lite/kernels/op_macros.h"
 
 #if defined(_MSC_VER)
 #define __restrict__ __restrict
@@ -37,12 +38,6 @@ namespace {
 const int32_t kInt16Max = std::numeric_limits<int16_t>::max();
 const int32_t kInt16Min = std::numeric_limits<int16_t>::min();
 }  // namespace
-
-float PortableClip(float f, float abs_limit) {
-  float result = (abs_limit < f) ? abs_limit : f;
-  result = (-abs_limit > result) ? -abs_limit : result;
-  return result;
-}
 
 template <typename T>
 bool PortableIsZeroVectorImpl(const T* vector, int v_size, T zero_value) {
@@ -531,6 +526,30 @@ float PortableVectorVectorDotProduct(const float* vector1, const float* vector2,
   return result;
 }
 
+namespace {
+inline int32_t VectorVectorDotProduct(const int16_t* vector1,
+                                      const int16_t* vector2, int v_size) {
+  int32_t result = 0;
+  for (int v = 0; v < v_size; v++) {
+    result += *vector1++ * *vector2++;
+  }
+  return result;
+}
+}  // namespace
+
+void PortableBatchVectorBatchVectorDotProduct(const int16_t* vector1,
+                                              const int16_t* vector2,
+                                              int v_size, int n_batch,
+                                              int32_t* result,
+                                              int result_stride) {
+  for (int b = 0; b < n_batch; b++) {
+    *result = VectorVectorDotProduct(vector1, vector2, v_size);
+    vector1 += v_size;
+    vector2 += v_size;
+    result += result_stride;
+  }
+}
+
 void PortableVectorVectorCwiseProductAccumulate(const float* vector1,
                                                 const float* vector2,
                                                 int v_size, float* result) {
@@ -571,23 +590,6 @@ void PortableVectorBatchVectorAdd(const float* vector, int v_size, int n_batch,
   }
 }
 
-void PortableApplySigmoidToVector(const float* vector, int v_size,
-                                  float* result) {
-  auto sigmoid_func = ActivationFunctor(kTfLiteActSigmoid);
-  for (int v = 0; v < v_size; v++) {
-    *result++ = (sigmoid_func)(*vector++);
-  }
-}
-
-void PortableApplyActivationToVector(const float* vector, int v_size,
-                                     TfLiteFusedActivation activation,
-                                     float* result) {
-  auto activation_func = ActivationFunctor(activation);
-  for (int v = 0; v < v_size; v++) {
-    *result++ = (activation_func)(*vector++);
-  }
-}
-
 void PortableSub1Vector(const float* vector, int v_size, float* result) {
   for (int v = 0; v < v_size; v++) {
     *result++ = 1.0f - *vector++;
@@ -611,7 +613,7 @@ void PortableVectorScalarMultiply(const int8_t* vector, const int v_size,
 void PortableClipVector(const float* vector, int v_size, float abs_limit,
                         float* result) {
   for (int v = 0; v < v_size; v++) {
-    *result++ = PortableClip(*vector++, abs_limit);
+    result[v] = std::max(std::min(abs_limit, vector[v]), -abs_limit);
   }
 }
 
@@ -625,25 +627,35 @@ void PortableReductionSumVector(const float* input_vector, float* output_vector,
   }
 }
 
+void PortableReductionSumVector(const int32_t* input_vector,
+                                int32_t* output_vector, int output_size,
+                                int reduction_size) {
+  const int32_t* input_vector_ptr = input_vector;
+  for (int o = 0; o < output_size; o++) {
+    for (int r = 0; r < reduction_size; r++) {
+      output_vector[o] += *input_vector_ptr++;
+    }
+  }
+}
+
 void PortableMeanStddevNormalization(const float* input_vector,
                                      float* output_vector, int v_size,
                                      int n_batch) {
   for (int batch = 0; batch < n_batch; ++batch) {
     float sum = 0.0f;
-    float sum_sq = 0.0f;
     for (int i = 0; i < v_size; ++i) {
       sum += input_vector[i];
-      sum_sq += input_vector[i] * input_vector[i];
     }
     const float mean = sum / v_size;
-    float stddev_inv = 0.0f;
-    const float variance = sum_sq / v_size - mean * mean;
-    if (variance == 0) {
-      constexpr float kNormalizationConstant = 1e-8;
-      stddev_inv = 1.0f / std::sqrt(kNormalizationConstant);
-    } else {
-      stddev_inv = 1.0f / std::sqrt(variance);
+    float sum_diff_sq = 0.0f;
+    for (int i = 0; i < v_size; ++i) {
+      const float diff = input_vector[i] - mean;
+      sum_diff_sq += diff * diff;
     }
+    const float variance = sum_diff_sq / v_size;
+    constexpr float kNormalizationConstant = 1e-8f;
+    const float stddev_inv =
+        1.0f / std::sqrt(variance + kNormalizationConstant);
     for (int i = 0; i < v_size; ++i) {
       output_vector[i] = (input_vector[i] - mean) * stddev_inv;
     }

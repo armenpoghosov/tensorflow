@@ -40,6 +40,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/tensorflow/transforms/lower_tf.h"
 #include "tensorflow/compiler/mlir/xla/convert_op_folder.h"
 #include "tensorflow/compiler/mlir/xla/ir/hlo_ops.h"
+#include "tensorflow/compiler/mlir/xla/ir/hlo_utils.h"
 #include "tensorflow/compiler/mlir/xla/transforms/passes.h"
 #include "tensorflow/core/framework/common_shape_fns.h"
 #include "tensorflow/core/kernels/conv_grad_shape_utils.h"
@@ -49,15 +50,33 @@ limitations under the License.
 using namespace mlir;
 
 namespace {
-struct LegalizeTF : public FunctionPass<LegalizeTF> {
+class LegalizeTF : public FunctionPass<LegalizeTF> {
+ public:
+  struct Options : public PassOptions<Options> {
+    Option<bool> allow_partial_conversion{
+        *this, "allow-partial-conversion",
+        llvm::cl::desc("Allow operations that can't be legalized."),
+        llvm::cl::init(false)};
+  };
+
+  explicit LegalizeTF(bool allow_partial_conversion)
+      : FunctionPass<LegalizeTF>(),
+        allow_partial_conversion_(allow_partial_conversion) {}
+
+  explicit LegalizeTF(const Options &option)
+      : LegalizeTF(option.allow_partial_conversion) {}
+
   /// Performs the lowering to XLA dialect.
   void runOnFunction() override;
+
+ private:
+  bool allow_partial_conversion_;
 };
 }  // end anonymous namespace
 
 std::unique_ptr<mlir::OpPassBase<mlir::FuncOp>>
-mlir::xla_hlo::createLegalizeTFPass() {
-  return std::make_unique<LegalizeTF>();
+mlir::xla_hlo::createLegalizeTFPass(bool allow_partial_conversion) {
+  return std::make_unique<LegalizeTF>(allow_partial_conversion);
 }
 
 /// Returns if the given TF data format string is the default format.
@@ -74,8 +93,7 @@ static DenseIntElementsAttr GetI64ElementsAttr(ArrayRef<int64_t> values,
                                                Builder *builder) {
   RankedTensorType ty = RankedTensorType::get(
       {static_cast<int64_t>(values.size())}, builder->getIntegerType(64));
-  return DenseElementsAttr::get<int64_t>(ty, values)
-      .cast<DenseIntElementsAttr>();
+  return DenseIntElementsAttr::get(ty, values);
 }
 
 // Converts an ArrayAttr to a 1D 64-bit dense elements attribute.
@@ -83,8 +101,7 @@ static DenseIntElementsAttr GetI64ElementsAttr(ArrayAttr attr) {
   RankedTensorType ty =
       RankedTensorType::get(static_cast<int64_t>(attr.size()),
                             IntegerType::get(64, attr.getContext()));
-  return DenseElementsAttr::get(ty, attr.getValue())
-      .cast<DenseIntElementsAttr>();
+  return DenseIntElementsAttr::get(ty, attr.getValue());
 }
 
 static IntegerAttr GetHLOAxisFromTFAxis(ElementsAttr attr, int64_t rank,
@@ -155,10 +172,11 @@ static xla_hlo::ConstOp GetMinValueForType(Type ty, Location loc,
   return rewriter->create<xla_hlo::ConstOp>(loc, attr);
 }
 
-// Returns an integer constant for the given int or float element type.
-static xla_hlo::ConstOp GetScalarForType(Type ty, Location loc,
-                                         int64_t raw_value,
-                                         PatternRewriter *rewriter) {
+// Returns int or float scalar DenseElementsAttr attribute with the given
+// element type and the value.
+static xla_hlo::ConstOp GetScalarOfType(Type ty, Location loc,
+                                        int64_t raw_value,
+                                        PatternRewriter *rewriter) {
   RankedTensorType scalar_ty = RankedTensorType::get({}, ty);
 
   DenseElementsAttr attr;
@@ -167,7 +185,7 @@ static xla_hlo::ConstOp GetScalarForType(Type ty, Location loc,
     attr = DenseElementsAttr::get(scalar_ty, value);
   } else {
     auto int_ty = ty.cast<IntegerType>();
-    APInt value(int_ty.getWidth(), raw_value, true);
+    APInt value(int_ty.getWidth(), static_cast<int64_t>(raw_value), true);
     attr = DenseElementsAttr::get(scalar_ty, value);
   }
   return rewriter->create<xla_hlo::ConstOp>(loc, attr);
@@ -213,8 +231,7 @@ static DenseIntElementsAttr getBiasFeatureDimension(Builder &b,
   auto inputType = input->getType().cast<RankedTensorType>();
   size_t featureDim = getFeatureDimension(format, inputType);
   RankedTensorType type = RankedTensorType::get(1, b.getIntegerType(64));
-  return DenseIntElementsAttr::get(type, featureDim)
-      .cast<DenseIntElementsAttr>();
+  return DenseIntElementsAttr::get(type, featureDim);
 }
 
 //===----------------------------------------------------------------------===//
@@ -250,32 +267,13 @@ static DenseIntElementsAttr SliceDenseIntElementsAttrColumn2D(
     }
   }
 
-  return DenseIntElementsAttr::get<int64_t>(
-             RankedTensorType::get({shape[0]}, element_type), values)
-      .cast<DenseIntElementsAttr>();
+  return DenseIntElementsAttr::get(
+      RankedTensorType::get({shape[0]}, element_type), values);
 }
 
 //===----------------------------------------------------------------------===//
 // Binary op utilities.
 //===----------------------------------------------------------------------===//
-
-/// Get a constant splat for the given value type.
-template <typename T>
-static ElementsAttr getSplat(Builder &b, Value *val, T constant) {
-  auto valType = val->getType().cast<TensorType>();
-  auto valElementType = getElementTypeOrSelf(val->getType());
-
-  // Handle integer elements.
-  Attribute elementAttr;
-  if (valElementType.isa<IntegerType>())
-    elementAttr = b.getIntegerAttr(valElementType, constant);
-  else if (valElementType.isa<FloatType>())
-    elementAttr = b.getFloatAttr(valElementType, constant);
-  else
-    llvm_unreachable("unhandled element type");
-
-  return DenseIntElementsAttr::get(valType, elementAttr);
-}
 
 // Returns whether the two values are guaranteed to be broadcastable to the
 // same shape, this broadcasts size 1 tensors up to any rank. Dynamic dimensions
@@ -307,38 +305,6 @@ static bool AreBroadcastCompatible(Value *x, Value *y) {
   return true;
 }
 
-static DenseIntElementsAttr getBroadcastDimensionsAttr(Builder &b, Value *x,
-                                                       Value *y) {
-  TensorType xType = x->getType().dyn_cast<RankedTensorType>();
-  TensorType yType = y->getType().dyn_cast<RankedTensorType>();
-  if (xType == yType || !xType || !yType) return {};
-
-  // If the shapes have the same rank, then there is nothing to do.
-  auto xRank = xType.getRank(), yRank = yType.getRank();
-  if (xRank == yRank) return {};
-
-  // Otherwise if the ranks of the inputs don't match, TensorFlow automatically
-  // reshapes the smaller by padding with dimensions of size 1 as a prefix. In
-  // other words to pad a 5-vector to a 3-dimensional tensor it is reshaped to
-  // have shape [1,1,5]. XLA's automatic broadcast code is able to broadcast
-  // from lower to higher rank, but doesn't assume you want to pad as a prefix
-  // of the dimensions, and instead needs to be told which dimensions of the
-  // higher rank tensor to match to the lower rank tensor.
-  auto maxRank = std::max(xRank, yRank);
-  auto minRank = std::min(xRank, yRank);
-
-  // Match the lower rank tensor along the larger-numbered dimensions of the
-  // higher rank tensor.
-  SmallVector<int64_t, 4> broadcastDimensions(minRank);
-  std::iota(broadcastDimensions.begin(), broadcastDimensions.end(),
-            maxRank - minRank);
-
-  RankedTensorType type =
-      RankedTensorType::get({minRank}, b.getIntegerType(64));
-  return DenseIntElementsAttr::get<int64_t>(type, broadcastDimensions)
-      .cast<DenseIntElementsAttr>();
-}
-
 // Return a new TensorType the same rank and dimensions as the input with an
 // updated element type.
 static Type ChangeTensorElementType(Builder *b, Type tensor_type,
@@ -366,8 +332,7 @@ static DenseIntElementsAttr GetI64ElementsAttrForSeq(int start, int end,
   std::iota(vals.begin(), vals.end(), start);
 
   TensorType ty = RankedTensorType::get({size}, builder->getIntegerType(64));
-  return DenseIntElementsAttr::get<int64_t>(ty, vals)
-      .cast<DenseIntElementsAttr>();
+  return DenseIntElementsAttr::get(ty, vals);
 }
 
 // Returns the type to use for accumulating the given type.
@@ -595,7 +560,7 @@ class ConvertConv : public OpRewritePattern<OpT> {
         tensorflow::int64 pad_low_int64;
         tensorflow::int64 pad_high_int64;
         tensorflow::Status status = tensorflow::GetWindowedOutputSizeVerboseV2(
-            input_ty.getDimSize(i), filter_ty.getDimSize(i), dilation, stride,
+            input_ty.getDimSize(dim), filter_ty.getDimSize(i), dilation, stride,
             padding, &output_size, &pad_low_int64, &pad_high_int64);
         if (!status.ok()) return Pattern::matchFailure();
         pad_low = pad_low_int64;
@@ -762,8 +727,7 @@ class ConvertSigmoidOp : public OpRewritePattern<TF::SigmoidOp> {
         DenseIntElementsAttr::get(
             RankedTensorType::get({shaped_type.getRank()},
                                   rewriter.getIntegerType(64)),
-            shaped_type.getShape())
-            .cast<DenseIntElementsAttr>());
+            shaped_type.getShape()));
 
     auto scaled_input = rewriter.create<xla_hlo::MulOp>(
         op.getLoc(), operand, constant_ones, DenseIntElementsAttr());
@@ -859,6 +823,145 @@ class ConvertSoftmaxOp : public OpRewritePattern<OpTy> {
       rewriter.replaceOpWithNewOp<xla_hlo::DivOp>(op, exp, sum, batch_dims);
     }
     return Pattern::matchSuccess();
+  }
+};
+
+// Converts Size to HLO ops, computing the size of a ranked input tensor.
+// TODO(b/145253252): Update this to not require ranked input tensor shapes.
+//
+// The main logic of this pattern is to calculate the size by multiplying every
+// dimension of the input tensor's shape together.
+//
+// For example, the following source IR:
+//
+//   %size = "tf.Size"(%input) : (tensor<2x?x8xf32>) -> tensor<i32>
+//
+// will be converted into:
+//
+//   %const = xla_hlo.constant dense<1> : tensor<i32>
+//   %dim_0 = "xla_hlo.get_dimension_size"(%input) {dimension = 0 : i32} :
+//                                         (tensor<2x?x8xf32>) -> tensor<i32>
+//   %prod_0 = xla_hlo.mul %const, %dim_0 : tensor<i32>
+//   %dim_1 = "xla_hlo.get_dimension_size"(%input) {dimension = 1 : i32} :
+//                                         (tensor<2x?x8xf32>) -> tensor<i32>
+//   %prod_1 = xla_hlo.mul %prod_0, %dim_1 : tensor<i32>
+//   %dim_2 = "xla_hlo.get_dimension_size"(%input) {dimension = 2 : i32} :
+//                                         (tensor<2x?x8xf32>) -> tensor<i32>
+//   %size = xla_hlo.mul %prod_1, %dim_2 : tensor<i32>
+class ConvertSizeOp : public OpRewritePattern<TF::SizeOp> {
+ public:
+  using OpRewritePattern::OpRewritePattern;
+
+  PatternMatchResult matchAndRewrite(TF::SizeOp op,
+                                     PatternRewriter &rewriter) const override {
+    Value *input = op.input();
+    auto input_ty = input->getType().dyn_cast<RankedTensorType>();
+    if (!input_ty) return Pattern::matchFailure();
+
+    const int64_t rank = input_ty.getRank();
+    auto result_type = op.getResult()->getType();
+    Operation *size =
+        GetScalarOfType(result_type.cast<TensorType>().getElementType(),
+                        op.getLoc(), 1, &rewriter);
+    for (int64_t i = 0; i < rank; ++i) {
+      auto dim = rewriter.create<xla_hlo::GetDimensionSizeOp>(
+          op.getLoc(), result_type, input,
+          rewriter.getIntegerAttr(rewriter.getIntegerType(32), i));
+      size = rewriter.create<xla_hlo::MulOp>(
+          op.getLoc(), size->getResult(0), dim.getResult(),
+          /*DenseIntElementsAttr=*/DenseIntElementsAttr());
+    }
+    rewriter.replaceOp(op, size->getResult(0));
+
+    return Pattern::matchSuccess();
+  }
+};
+
+// Converts the tf.Split op into a series of HLO slice ops when the tensor to be
+// split has fuly static shape and the dimension to split is a constant.
+//
+// The main logic of this pattern is to calculate the index start and end range
+// for each slice. And this happens only on the dimension to be split; for all
+// other dimensions, all resultant slices' index start and end range covers the
+// input tensor's full range. Strides for all resultant slices are all one.
+//
+// For example, the following source IR:
+//
+//   %dim = "tf.Const"() {value = dense<1> : tensor<i32>} : () -> tensor<i32>
+//   %0:3 = "tf.Split"(%dim, %input) : (tensor<i32>, tensor<4x6xf32>) ->
+//                (tensor<4x2xf32>, tensor<4x2xf32>, tensor<4x2xf32>)
+//
+// will be converted into:
+//
+//   %0 = "xla_hlo.slice"(%input) {
+//             limit_indices = dense<[4, 2]> : tensor<2xi64>,
+//             start_indices = dense<0> : tensor<2xi64>,
+//             strides = dense<1> : tensor<2xi64>} :
+//        (tensor<4x6xf32>) -> tensor<4x2xf32>
+//   %1 = "xla_hlo.slice"(%input) {
+//             limit_indices = dense<4> : tensor<2xi64>,
+//              start_indices = dense<[0, 2]> : tensor<2xi64>,
+//            strides = dense<1> : tensor<2xi64>} :
+//        (tensor<4x6xf32>) -> tensor<4x2xf32>
+//    %2 = "xla_hlo.slice"(%input) {
+//            limit_indices = dense<[4, 6]> : tensor<2xi64>,
+//            start_indices = dense<[0, 4]> : tensor<2xi64>,
+//             strides = dense<1> : tensor<2xi64>} :
+//        (tensor<4x6xf32>) -> tensor<4x2xf32>
+// TODO(antiagainst): consider lowering into TF ops so the pattern can be more
+// applicable.
+class ConvertSplitOp : public OpRewritePattern<TF::SplitOp> {
+ public:
+  using OpRewritePattern::OpRewritePattern;
+
+  PatternMatchResult matchAndRewrite(TF::SplitOp op,
+                                     PatternRewriter &rewriter) const override {
+    // We can only match when the tensor to be split has fully static shape.
+    auto input_type = op.value()->getType().dyn_cast<RankedTensorType>();
+    if (!input_type || !input_type.hasStaticShape()) return matchFailure();
+
+    // We can only match when the split dimension is a constant scalar.
+    DenseIntElementsAttr split_dim_attr;
+    if (!matchPattern(op.split_dim(), m_Constant(&split_dim_attr)))
+      return matchFailure();
+
+    // Get the dimension we are splitting at. Offset properly if it's negative.
+    int64_t input_rank = input_type.getRank();
+    int64_t dim_index = (*split_dim_attr.begin()).getSExtValue();
+    if (dim_index < 0) dim_index += input_rank;
+
+    // Calculate the dimension size for each slice along the split dimension.
+    int64_t input_dim_size = input_type.getDimSize(dim_index);
+    int64_t num_splits = op.getNumResults();
+    int64_t slice_size = input_dim_size / num_splits;
+
+    // Get each slice's type.
+    auto slice_shape = llvm::to_vector<4>(input_type.getShape());
+    slice_shape[dim_index] = slice_size;
+    Type slice_type =
+        RankedTensorType::get(slice_shape, input_type.getElementType());
+
+    // Parameters for constructing each slice.
+    SmallVector<int64_t, 4> begin_indices(input_rank, 0);
+    auto end_indices = llvm::to_vector<4>(input_type.getShape());
+    SmallVector<int64_t, 4> strides(input_rank, 1);
+
+    // All HLO slice results used to replace the original tf.Split op.
+    SmallVector<Value *, 4> slices;
+    slices.reserve(num_splits);
+
+    for (int i = 0; i < num_splits; ++i) {
+      begin_indices[dim_index] = i * slice_size;
+      end_indices[dim_index] = (i + 1) * slice_size;
+      slices.push_back(rewriter.create<xla_hlo::SliceOp>(
+          op.getLoc(), slice_type, op.value(),
+          GetI64ElementsAttr(begin_indices, &rewriter),
+          GetI64ElementsAttr(end_indices, &rewriter),
+          GetI64ElementsAttr(strides, &rewriter)));
+    }
+
+    rewriter.replaceOp(op, slices);
+    return matchSuccess();
   }
 };
 
@@ -1005,10 +1108,10 @@ class ConvertRangeOp : public OpRewritePattern<TF::RangeOp> {
                                                  rewriter.getI64IntegerAttr(0));
     auto scaled = rewriter.create<xla_hlo::MulOp>(
         op.getLoc(), result_type, iota, op.delta(),
-        getBroadcastDimensionsAttr(rewriter, iota, op.delta()));
+        getBroadcastDimensionsAttr(&rewriter, iota, op.delta()));
     rewriter.replaceOpWithNewOp<xla_hlo::AddOp>(
         op, result_type, scaled, op.start(),
-        getBroadcastDimensionsAttr(rewriter, scaled, op.start()));
+        getBroadcastDimensionsAttr(&rewriter, scaled, op.start()));
     return matchSuccess();
   }
 };
@@ -1081,7 +1184,7 @@ class GenericConvertReductionOp : public OpRewritePattern<OpTy> {
         }
       }
       auto divisor =
-          GetScalarForType(reduce_element_type, loc, divisor_count, &rewriter);
+          GetScalarOfType(reduce_element_type, loc, divisor_count, &rewriter);
       auto broadcast_dims = GetI64ElementsAttr({}, &rewriter);
       result = rewriter.create<xla_hlo::DivOp>(loc, result, divisor.getResult(),
                                                broadcast_dims);
@@ -1115,7 +1218,7 @@ class ConvertMeanOp
 
   static Value *GetInitialValue(Type reduce_element_type, Location loc,
                                 PatternRewriter &rewriter) {
-    return GetScalarForType(reduce_element_type, loc, 0, &rewriter);
+    return GetScalarOfType(reduce_element_type, loc, 0, &rewriter);
   }
 };
 
@@ -1131,7 +1234,7 @@ class ConvertSumOp : public GenericConvertReductionOp<ConvertSumOp, TF::SumOp,
 
   static Value *GetInitialValue(Type reduce_element_type, Location loc,
                                 PatternRewriter &rewriter) {
-    return GetScalarForType(reduce_element_type, loc, 0, &rewriter);
+    return GetScalarOfType(reduce_element_type, loc, 0, &rewriter);
   }
 };
 
@@ -1186,7 +1289,7 @@ class ConvertArgMinMaxOp : public OpRewritePattern<OpTy> {
 
     Type index_element_type = output_type.getElementType();
     Value *index_init_value =
-        GetScalarForType(index_element_type, loc, 0, &rewriter);
+        GetScalarOfType(index_element_type, loc, 0, &rewriter);
 
     RankedTensorType index_type =
         RankedTensorType::get(input_type.getShape(), index_element_type);
@@ -1330,7 +1433,7 @@ class ConvertMaxPoolGradOp : public OpRewritePattern<TF::MaxPoolGradOp> {
 
     auto result = rewriter.create<xla_hlo::SelectAndScatterOp>(
         loc, op.getType(), op.orig_input(), op.grad(),
-        GetScalarForType(element_type, loc, 0, &rewriter),
+        GetScalarOfType(element_type, loc, 0, &rewriter),
         GetI64ElementsAttr(op.ksize()), GetI64ElementsAttr(op.strides()),
         nullptr);
 
@@ -1449,8 +1552,7 @@ class ConvertConv2DBackpropInputOp
     }
     RankedTensorType paddings_ty = mlir::RankedTensorType::get(
         {num_spatial_dims, 2}, rewriter.getIntegerType(64));
-    auto paddings_attr =
-        DenseIntElementsAttr::get<int64_t>(paddings_ty, conv_paddings);
+    auto paddings_attr = DenseIntElementsAttr::get(paddings_ty, conv_paddings);
     auto spatial_dims_attr = GetI64ElementsAttr(spatial_dims, &rewriter);
 
     Value *filter = op.filter();
@@ -1473,8 +1575,7 @@ class ConvertConv2DBackpropInputOp
     Value *result = rewriter.create<xla_hlo::ConvOp>(
         loc, op.getType(), op.out_backprop(), filter,
         /*window_strides=*/GetI64ElementsAttr(ones, &rewriter),
-        /*padding=*/paddings_attr.cast<DenseIntElementsAttr>(),
-        GetI64ElementsAttr(lhs_dilation, &rewriter),
+        /*padding=*/paddings_attr, GetI64ElementsAttr(lhs_dilation, &rewriter),
         GetI64ElementsAttr(rhs_dilation, &rewriter),
         xla_hlo::ConvDimensionNumbers::get(
             /*input_batch_dimension=*/batch_dim_attr,
@@ -1662,8 +1763,7 @@ class ConvertConv2DBackpropFilterOp
 
     RankedTensorType paddings_ty = mlir::RankedTensorType::get(
         {num_spatial_dims, 2}, rewriter.getIntegerType(64));
-    auto paddings_attr =
-        DenseIntElementsAttr::get<int64_t>(paddings_ty, conv_padding);
+    auto paddings_attr = DenseIntElementsAttr::get(paddings_ty, conv_padding);
     auto out_spatial_dims_attr =
         GetI64ElementsAttrForSeq(0, num_spatial_dims, &rewriter);
     auto kernel_spatial_dims_attr =
@@ -1676,8 +1776,7 @@ class ConvertConv2DBackpropFilterOp
     Value *result = rewriter.create<xla_hlo::ConvOp>(
         loc, op.getType(), op.input(), op.out_backprop(),
         /*window_strides=*/GetI64ElementsAttr(window_strides, &rewriter),
-        /*padding=*/paddings_attr.cast<DenseIntElementsAttr>(),
-        GetI64ElementsAttr(lhs_dilation, &rewriter),
+        /*padding=*/paddings_attr, GetI64ElementsAttr(lhs_dilation, &rewriter),
         GetI64ElementsAttr(rhs_dilation, &rewriter),
         xla_hlo::ConvDimensionNumbers::get(
             // Swap batch_dim and feature_dim in the activations.
@@ -1766,7 +1865,8 @@ class ConvertOneHotOp : public OpRewritePattern<TF::OneHotOp> {
 }  // end namespace xla
 }  // end namespace mlir
 
-LogicalResult mlir::xla_hlo::legalizeTF(Operation *op) {
+LogicalResult mlir::xla_hlo::legalizeTF(Operation *op,
+                                        bool allow_partial_conversion) {
   MLIRContext *context = op->getContext();
 
   // Add lowering patterns to the list.
@@ -1780,25 +1880,34 @@ LogicalResult mlir::xla_hlo::legalizeTF(Operation *op) {
   patterns.insert<mlir::xla::ConvertArgMaxOp, mlir::xla::ConvertBF16FloorDivOp,
                   mlir::xla::ConvertConv2D, mlir::xla::ConvertMaxPoolOp,
                   mlir::xla::ConvertRangeOp, mlir::xla::ConvertSigmoidOp,
+                  mlir::xla::ConvertSizeOp,
                   mlir::xla::ConvertSoftmaxOp<TF::LogSoftmaxOp, true>,
                   mlir::xla::ConvertSoftmaxOp<TF::SoftmaxOp, false>,
-                  mlir::xla::ConvertStridedSliceOp, mlir::xla::ConvertMeanOp,
-                  mlir::xla::ConvertSumOp, mlir::xla::ConvertMaxOp,
-                  mlir::xla::ConvertTileOp, mlir::xla::ConvertMaxPoolGradOp,
-                  mlir::xla::ConvertOneHotOp,
+                  mlir::xla::ConvertSplitOp, mlir::xla::ConvertStridedSliceOp,
+                  mlir::xla::ConvertMeanOp, mlir::xla::ConvertSumOp,
+                  mlir::xla::ConvertMaxOp, mlir::xla::ConvertTileOp,
+                  mlir::xla::ConvertMaxPoolGradOp, mlir::xla::ConvertOneHotOp,
                   mlir::xla::ConvertConv2DBackpropInputOp,
                   mlir::xla::ConvertConv2DBackpropFilterOp>(op->getContext());
 
   ConversionTarget target(*context);
   target.addLegalDialect<XlaHloDialect>();
 
+  if (!allow_partial_conversion) {
+    target.addLegalOp<mlir::CallOp, mlir::ModuleOp, mlir::FuncOp,
+                      mlir::ModuleTerminatorOp, mlir::ReturnOp>();
+    return applyFullConversion(op, target, patterns);
+  }
+
   return applyPartialConversion(op, target, patterns);
 }
 
 /// Performs the lowering to XLA dialect.
 void LegalizeTF::runOnFunction() {
-  if (failed(mlir::xla_hlo::legalizeTF(getFunction()))) signalPassFailure();
+  if (failed(
+          mlir::xla_hlo::legalizeTF(getFunction(), allow_partial_conversion_)))
+    signalPassFailure();
 }
 
-static PassRegistration<LegalizeTF> pass(
+static PassRegistration<LegalizeTF, LegalizeTF::Options> pass(
     "xla-legalize-tf", "Legalize from TensorFlow to the XLA dialect");

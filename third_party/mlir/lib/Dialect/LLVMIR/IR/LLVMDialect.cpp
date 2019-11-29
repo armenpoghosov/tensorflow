@@ -22,6 +22,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
+#include "mlir/IR/FunctionImplementation.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/Module.h"
 #include "mlir/IR/StandardTypes.h"
@@ -427,7 +428,8 @@ void LLVM::ExtractElementOp::build(Builder *b, OperationState &result,
 }
 
 static void printExtractElementOp(OpAsmPrinter &p, ExtractElementOp &op) {
-  p << op.getOperationName() << ' ' << *op.vector() << ", " << *op.position();
+  p << op.getOperationName() << ' ' << *op.vector() << "[" << *op.position()
+    << " : " << op.position()->getType() << "]";
   p.printOptionalAttrDict(op.getAttrs());
   p << " : " << op.vector()->getType();
 }
@@ -438,16 +440,14 @@ static ParseResult parseExtractElementOp(OpAsmParser &parser,
                                          OperationState &result) {
   llvm::SMLoc loc;
   OpAsmParser::OperandType vector, position;
-  auto *llvmDialect = parser.getBuilder()
-                          .getContext()
-                          ->getRegisteredDialect<LLVM::LLVMDialect>();
-  Type type, i32Type = LLVMType::getInt32Ty(llvmDialect);
+  Type type, positionType;
   if (parser.getCurrentLocation(&loc) || parser.parseOperand(vector) ||
-      parser.parseComma() || parser.parseOperand(position) ||
+      parser.parseLSquare() || parser.parseOperand(position) ||
+      parser.parseColonType(positionType) || parser.parseRSquare() ||
       parser.parseOptionalAttrDict(result.attributes) ||
       parser.parseColonType(type) ||
       parser.resolveOperand(vector, type, result.operands) ||
-      parser.resolveOperand(position, i32Type, result.operands))
+      parser.resolveOperand(position, positionType, result.operands))
     return failure();
   auto wrappedVectorType = type.dyn_cast<LLVM::LLVMType>();
   if (!wrappedVectorType ||
@@ -555,8 +555,8 @@ static ParseResult parseExtractValueOp(OpAsmParser &parser,
 //===----------------------------------------------------------------------===//
 
 static void printInsertElementOp(OpAsmPrinter &p, InsertElementOp &op) {
-  p << op.getOperationName() << ' ' << *op.vector() << ", " << *op.value()
-    << ", " << *op.position();
+  p << op.getOperationName() << ' ' << *op.value() << ", " << *op.vector()
+    << "[" << *op.position() << " : " << op.position()->getType() << "]";
   p.printOptionalAttrDict(op.getAttrs());
   p << " : " << op.vector()->getType();
 }
@@ -567,13 +567,11 @@ static ParseResult parseInsertElementOp(OpAsmParser &parser,
                                         OperationState &result) {
   llvm::SMLoc loc;
   OpAsmParser::OperandType vector, value, position;
-  auto *llvmDialect = parser.getBuilder()
-                          .getContext()
-                          ->getRegisteredDialect<LLVM::LLVMDialect>();
-  Type vectorType, i32Type = LLVMType::getInt32Ty(llvmDialect);
-  if (parser.getCurrentLocation(&loc) || parser.parseOperand(vector) ||
-      parser.parseComma() || parser.parseOperand(value) ||
-      parser.parseComma() || parser.parseOperand(position) ||
+  Type vectorType, positionType;
+  if (parser.getCurrentLocation(&loc) || parser.parseOperand(value) ||
+      parser.parseComma() || parser.parseOperand(vector) ||
+      parser.parseLSquare() || parser.parseOperand(position) ||
+      parser.parseColonType(positionType) || parser.parseRSquare() ||
       parser.parseOptionalAttrDict(result.attributes) ||
       parser.parseColonType(vectorType))
     return failure();
@@ -589,7 +587,7 @@ static ParseResult parseInsertElementOp(OpAsmParser &parser,
 
   if (parser.resolveOperand(vector, vectorType, result.operands) ||
       parser.resolveOperand(value, valueType, result.operands) ||
-      parser.resolveOperand(position, i32Type, result.operands))
+      parser.resolveOperand(position, positionType, result.operands))
     return failure();
 
   result.addTypes(vectorType);

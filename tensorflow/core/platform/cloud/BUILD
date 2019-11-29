@@ -35,7 +35,10 @@ cc_library(
     name = "file_block_cache",
     hdrs = ["file_block_cache.h"],
     copts = tf_copts(),
-    deps = ["//tensorflow/core:lib"],
+    deps = [
+        "//tensorflow/core:lib",
+        "//tensorflow/core/platform:stringpiece",
+    ],
 )
 
 cc_library(
@@ -47,6 +50,7 @@ cc_library(
     deps = [
         ":file_block_cache",
         "//tensorflow/core:lib",
+        "//tensorflow/core/platform:stringpiece",
     ],
 )
 
@@ -95,6 +99,8 @@ cc_library(
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:str_util",
+        "//tensorflow/core/platform:stringprintf",
         "@jsoncpp_git//:jsoncpp",
     ],
     alwayslink = 1,
@@ -127,6 +133,8 @@ cc_library(
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:str_util",
+        "//tensorflow/core/platform:stringprintf",
         "@jsoncpp_git//:jsoncpp",
     ],
     alwayslink = 1,
@@ -139,6 +147,7 @@ cc_library(
     deps = [
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:stringpiece",
     ],
 )
 
@@ -151,6 +160,8 @@ cc_library(
         ":http_request",
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:str_util",
+        "//tensorflow/core/platform:stringpiece",
         "@curl",
     ],
 )
@@ -167,6 +178,9 @@ cc_library(
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:test",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:status",
+        "//tensorflow/core/platform:stringpiece",
         "@curl",
     ],
 )
@@ -185,6 +199,8 @@ cc_library(
         ":retrying_utils",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:status",
         "@com_google_absl//absl/strings",
         "@jsoncpp_git//:jsoncpp",
     ],
@@ -222,6 +238,9 @@ cc_library(
         ":compute_engine_metadata_client",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:status",
+        "//tensorflow/core/platform:str_util",
     ],
 )
 
@@ -250,6 +269,8 @@ cc_library(
         ":http_request",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:status",
         "@boringssl//:crypto",
         "@jsoncpp_git//:jsoncpp",
     ],
@@ -335,6 +356,8 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:errors",
+        "//tensorflow/core/platform:str_util",
     ],
 )
 
@@ -348,6 +371,7 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:str_util",
     ],
 )
 
@@ -361,6 +385,7 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:str_util",
     ],
 )
 
@@ -452,6 +477,7 @@ tf_cc_test(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:str_util",
     ],
 )
 
@@ -476,5 +502,6 @@ tf_cc_test(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:str_util",
     ],
 )
