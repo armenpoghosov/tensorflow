@@ -67,8 +67,10 @@ inline SmallVector<IndexHandle, 8> makeIndexHandles(unsigned rank) {
   return SmallVector<IndexHandle, 8>(rank);
 }
 
+/// Entry point to build multiple ValueHandle* from a mutable list `ivs` of T.
+template <typename T>
 inline SmallVector<ValueHandle *, 8>
-makeIndexHandlePointers(MutableArrayRef<IndexHandle> ivs) {
+makeHandlePointers(MutableArrayRef<T> ivs) {
   SmallVector<ValueHandle *, 8> pivs;
   pivs.reserve(ivs.size());
   for (auto &iv : ivs) {
@@ -215,7 +217,7 @@ using select = ValueBuilder<SelectOp>;
 using std_load = ValueBuilder<LoadOp>;
 using std_store = OperationBuilder<StoreOp>;
 using subi = ValueBuilder<SubIOp>;
-using vector_type_cast = ValueBuilder<vector::VectorTypeCastOp>;
+using view = ValueBuilder<ViewOp>;
 
 /// Branches into the mlir::Block* captured by BlockHandle `b` with `operands`.
 ///

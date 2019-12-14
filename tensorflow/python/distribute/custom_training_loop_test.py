@@ -23,7 +23,6 @@ from tensorflow.python import tf2
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.distribute import combinations
 from tensorflow.python.distribute import strategy_combinations
-from tensorflow.python.distribute import tpu_strategy
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import test
@@ -38,13 +37,12 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
   @combinations.generate(
       combinations.combine(
           distribution=strategy_combinations.strategies_minus_tpu,
-          mode=["eager"]
-      ))
+          mode=["eager"]))
   def testFullEager(self, distribution):
     dataset = self._get_dataset()
 
     def train_step(data):
-      return data
+      return math_ops.square(data)
 
     dist_dataset = distribution.experimental_distribute_dataset(dataset)
     results = []
@@ -56,7 +54,7 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu,
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testStepInFunction(self, distribution):
@@ -64,7 +62,7 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
     @def_function.function
     def train_step(data):
-      return data
+      return math_ops.square(data)
 
     dist_dataset = distribution.experimental_distribute_dataset(dataset)
     results = []
@@ -76,15 +74,14 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu +
-          [strategy_combinations.tpu_strategy_one_step],
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testRunInFunction(self, distribution):
     dataset = self._get_dataset()
 
     def train_step(data):
-      return data
+      return math_ops.square(data)
 
     @def_function.function
     def f_train_step(input_data):
@@ -100,17 +97,14 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu +
-          [strategy_combinations.tpu_strategy_one_step],
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testRunInFunctionAutoGraphApplication(self, distribution):
     dataset = self._get_dataset()
 
     def train_step(data):
-      if math_ops.reduce_sum(data) < 0:
-        return -data
-      return data
+      return math_ops.square(data)
 
     @def_function.function
     def f_train_step(input_data):
@@ -126,7 +120,7 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu,
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testDatasetIterationInFunction(self, distribution):
@@ -168,14 +162,13 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu +
-          [strategy_combinations.tpu_strategy_one_step],
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testIterationInsideFunction(self, distribution):
 
     def step_fn(data):
-      return data
+      return math_ops.square(data)
 
     @def_function.function
     def train(dataset):
@@ -197,14 +190,13 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu +
-          [strategy_combinations.tpu_strategy_one_step],
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"]
       ))
   def testIterationOutsideFunction(self, distribution):
 
     def train_step(data):
-      return data
+      return math_ops.square(data)
 
     @def_function.function
     def f_train_step(input_data):
@@ -231,7 +223,7 @@ class InputIterationTest(test.TestCase, parameterized.TestCase):
         map(lambda x: math_ops.cast(x, dtypes.int32)).batch(2)
 
   def _validate_outputs(self, actual_results):
-    expected_results = [[i, i+1] for i in range(0, 10, 2)]
+    expected_results = [[i**2, (i+1)**2] for i in range(0, 10, 2)]
     self.assertEqual(len(expected_results), len(actual_results))
 
     for i, expected_result in enumerate(expected_results):
@@ -246,17 +238,11 @@ class GradientTapeTest(test.TestCase, parameterized.TestCase):
 
   @combinations.generate(
       combinations.combine(
-          distribution=strategy_combinations.strategies_minus_tpu +
-          [strategy_combinations.tpu_strategy_one_step],
+          distribution=strategy_combinations.all_strategies,
           mode=["eager"],
           model_in_tf_function=[True, False]
       ))
-  def test1(self, distribution, model_in_tf_function):
-    # b/134975331
-    if model_in_tf_function and isinstance(
-        distribution, (tpu_strategy.TPUStrategy, tpu_strategy.TPUStrategyV1)):
-      self.skipTest("model inside tf.function doesn't work with TPUStrategy")
-
+  def testNestedFunction(self, distribution, model_in_tf_function):
     def model(x):
       return x * x
 

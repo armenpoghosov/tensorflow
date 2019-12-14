@@ -73,9 +73,8 @@ void mlir::getCleanupLoopLowerBound(AffineForOp forOp, unsigned unrollFactor,
   }
 
   unsigned step = forOp.getStep();
-
-  SmallVector<Value *, 4> lbOperands(forOp.getLowerBoundOperands());
-  auto lb = b.create<AffineApplyOp>(forOp.getLoc(), lbMap, lbOperands);
+  auto lb = b.create<AffineApplyOp>(forOp.getLoc(), lbMap,
+                                    forOp.getLowerBoundOperands());
 
   // For each upper bound expr, get the range.
   // Eg: affine.for %i = lb to min (ub1, ub2),
@@ -747,7 +746,7 @@ static Loops stripmineSink(loop::ForOp forOp, Value *factor,
     // Insert newForOp before the terminator of `t`.
     OpBuilder b(t.getBodyBuilder());
     Value *stepped = b.create<AddIOp>(t.getLoc(), iv, forOp.step());
-    Value *less = b.create<CmpIOp>(t.getLoc(), CmpIPredicate::SLT,
+    Value *less = b.create<CmpIOp>(t.getLoc(), CmpIPredicate::slt,
                                    forOp.upperBound(), stepped);
     Value *ub =
         b.create<SelectOp>(t.getLoc(), less, forOp.upperBound(), stepped);
@@ -934,7 +933,7 @@ static LogicalResult tryIsolateBands(const TileLoops &tileLoops) {
 
 TileLoops mlir::extractFixedOuterLoops(loop::ForOp rootForOp,
                                        ArrayRef<int64_t> sizes) {
-  // Collect prefectly nested loops.  If more size values provided than nested
+  // Collect perfectly nested loops.  If more size values provided than nested
   // loops available, truncate `sizes`.
   SmallVector<loop::ForOp, 4> forOps;
   forOps.reserve(sizes.size());
@@ -979,7 +978,7 @@ TileLoops mlir::extractFixedOuterLoops(loop::ForOp rootForOp,
 static void
 replaceAllUsesExcept(Value *orig, Value *replacement,
                      const SmallPtrSetImpl<Operation *> &exceptions) {
-  for (auto &use : orig->getUses()) {
+  for (auto &use : llvm::make_early_inc_range(orig->getUses())) {
     if (exceptions.count(use.getOwner()) == 0)
       use.set(replacement);
   }
@@ -1118,11 +1117,12 @@ void mlir::mapLoopToProcessorIds(loop::ForOp forOp,
   for (unsigned i = 1, e = processorId.size(); i < e; ++i)
     mul = b.create<AddIOp>(loc, b.create<MulIOp>(loc, mul, numProcessors[i]),
                            processorId[i]);
-  Value *lb = b.create<AddIOp>(loc, forOp.lowerBound(), mul);
+  Value *lb = b.create<AddIOp>(loc, forOp.lowerBound(),
+                               b.create<MulIOp>(loc, forOp.step(), mul));
   forOp.setLowerBound(lb);
 
-  Value *step = numProcessors.front();
-  for (auto *numProcs : numProcessors.drop_front())
+  Value *step = forOp.step();
+  for (auto *numProcs : numProcessors)
     step = b.create<MulIOp>(loc, step, numProcs);
   forOp.setStep(step);
 }
@@ -1235,11 +1235,10 @@ static AffineForOp generatePointWiseCopy(Location loc, Value *memref,
                   memIndicesStart);
 
     // Construct the subscript for the slow memref being copied.
-    SmallVector<Value *, 2> operands = {memBase, forOp.getInductionVar()};
     auto memIndex = b.create<AffineApplyOp>(
         loc,
         AffineMap::get(2, 0, b.getAffineDimExpr(0) + b.getAffineDimExpr(1)),
-        operands);
+        ValueRange({memBase, forOp.getInductionVar()}));
     memIndices.push_back(memIndex);
   }
 

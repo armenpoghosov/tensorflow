@@ -20,14 +20,10 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef SPIRV_LOGICAL_OPS
-#else
+#ifndef SPIRV_LOGICAL_OPS
 #define SPIRV_LOGICAL_OPS
 
-#ifdef SPIRV_BASE
-#else
-include "mlir/SPIRV/SPIRVBase.td"
-#endif // SPIRV_BASE
+include "mlir/Dialect/SPIRV/SPIRVBase.td"
 
 class SPV_LogicalBinaryOp<string mnemonic, Type operandsType,
                     list<OpTrait> traits = []> :
@@ -66,7 +62,7 @@ def SPV_FOrdEqualOp : SPV_LogicalBinaryOp<"FOrdEqual", SPV_Float, [Commutative]>
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordequal-op ::= ssa-id `=` `spv.FOrdEqual` ssa-use, ssa-use
@@ -100,7 +96,7 @@ def SPV_FOrdGreaterThanOp : SPV_LogicalBinaryOp<"FOrdGreaterThan", SPV_Float, []
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordgt-op ::= ssa-id `=` `spv.FOrdGreaterThan` ssa-use, ssa-use
@@ -134,7 +130,7 @@ def SPV_FOrdGreaterThanEqualOp : SPV_LogicalBinaryOp<"FOrdGreaterThanEqual", SPV
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordgte-op ::= ssa-id `=` `spv.FOrdGreaterThanEqual` ssa-use, ssa-use
@@ -168,7 +164,7 @@ def SPV_FOrdLessThanOp : SPV_LogicalBinaryOp<"FOrdLessThan", SPV_Float, []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordlt-op ::= ssa-id `=` `spv.FOrdLessThan` ssa-use, ssa-use
@@ -202,7 +198,7 @@ def SPV_FOrdLessThanEqualOp : SPV_LogicalBinaryOp<"FOrdLessThanEqual", SPV_Float
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordlte-op ::= ssa-id `=` `spv.FOrdLessThanEqual` ssa-use, ssa-use
@@ -233,7 +229,7 @@ def SPV_FOrdNotEqualOp : SPV_LogicalBinaryOp<"FOrdNotEqual", SPV_Float, [Commuta
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     fordneq-op ::= ssa-id `=` `spv.FOrdNotEqual` ssa-use, ssa-use
@@ -264,7 +260,7 @@ def SPV_FUnordEqualOp : SPV_LogicalBinaryOp<"FUnordEqual", SPV_Float, [Commutati
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordequal-op ::= ssa-id `=` `spv.FUnordEqual` ssa-use, ssa-use
@@ -298,7 +294,7 @@ def SPV_FUnordGreaterThanOp : SPV_LogicalBinaryOp<"FUnordGreaterThan", SPV_Float
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordgt-op ::= ssa-id `=` `spv.FUnordGreaterThan` ssa-use, ssa-use
@@ -332,7 +328,7 @@ def SPV_FUnordGreaterThanEqualOp : SPV_LogicalBinaryOp<"FUnordGreaterThanEqual",
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordgte-op ::= ssa-id `=` `spv.FUnordGreaterThanEqual` ssa-use, ssa-use
@@ -366,7 +362,7 @@ def SPV_FUnordLessThanOp : SPV_LogicalBinaryOp<"FUnordLessThan", SPV_Float, []> 
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordlt-op ::= ssa-id `=` `spv.FUnordLessThan` ssa-use, ssa-use
@@ -400,7 +396,7 @@ def SPV_FUnordLessThanEqualOp : SPV_LogicalBinaryOp<"FUnordLessThanEqual", SPV_F
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordlte-op ::= ssa-id `=` `spv.FUnordLessThanEqual` ssa-use, ssa-use
@@ -431,7 +427,7 @@ def SPV_FUnordNotEqualOp : SPV_LogicalBinaryOp<"FUnordNotEqual", SPV_Float, [Com
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     float-scalar-vector-type ::= float-type |
                                  `vector<` integer-literal `x` float-type `>`
     funordneq-op ::= ssa-id `=` `spv.FUnordNotEqual` ssa-use, ssa-use
@@ -461,7 +457,7 @@ def SPV_IEqualOp : SPV_LogicalBinaryOp<"IEqual", SPV_Integer, [Commutative]> {
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     iequal-op ::= ssa-id `=` `spv.IEqual` ssa-use, ssa-use
@@ -492,7 +488,7 @@ def SPV_INotEqualOp : SPV_LogicalBinaryOp<"INotEqual", SPV_Integer, [Commutative
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     inot-equal-op ::= ssa-id `=` `spv.INotEqual` ssa-use, ssa-use
@@ -527,7 +523,7 @@ def SPV_LogicalAndOp : SPV_LogicalBinaryOp<"LogicalAnd", SPV_Bool, [Commutative]
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     logical-and ::= `spv.LogicalAnd` ssa-use `,` ssa-use
                     `:` operand-type
     ```
@@ -560,7 +556,7 @@ def SPV_LogicalEqualOp : SPV_LogicalBinaryOp<"LogicalEqual", SPV_Bool, [Commutat
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     logical-equal ::= `spv.LogicalEqual` ssa-use `,` ssa-use
                       `:` operand-type
     ```
@@ -590,7 +586,7 @@ def SPV_LogicalNotOp : SPV_LogicalUnaryOp<"LogicalNot", SPV_Bool, []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     logical-not ::= `spv.LogicalNot` ssa-use `:` operand-type
     ```
 
@@ -601,6 +597,8 @@ def SPV_LogicalNotOp : SPV_LogicalUnaryOp<"LogicalNot", SPV_Bool, []> {
     %2 = spv.LogicalNot %0 : vector<4xi1>
     ```
   }];
+
+  let hasCanonicalizer = 1;
 }
 
 // -----
@@ -622,7 +620,7 @@ def SPV_LogicalNotEqualOp : SPV_LogicalBinaryOp<"LogicalNotEqual", SPV_Bool, [Co
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     logical-not-equal ::= `spv.LogicalNotEqual` ssa-use `,` ssa-use
                           `:` operand-type
     ```
@@ -655,7 +653,7 @@ def SPV_LogicalOrOp : SPV_LogicalBinaryOp<"LogicalOr", SPV_Bool, [Commutative]> 
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     logical-or ::= `spv.LogicalOr` ssa-use `,` ssa-use
                     `:` operand-type
     ```
@@ -686,7 +684,7 @@ def SPV_SGreaterThanOp : SPV_LogicalBinaryOp<"SGreaterThan", SPV_Integer, []> {
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     sgreater-than-op ::= ssa-id `=` `spv.SGreaterThan` ssa-use, ssa-use
@@ -720,7 +718,7 @@ def SPV_SGreaterThanEqualOp : SPV_LogicalBinaryOp<"SGreaterThanEqual", SPV_Integ
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     sgreater-than-equal-op ::= ssa-id `=` `spv.SGreaterThanEqual` ssa-use, ssa-use
@@ -753,7 +751,7 @@ def SPV_SLessThanOp : SPV_LogicalBinaryOp<"SLessThan", SPV_Integer, []> {
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     sless-than-op ::= ssa-id `=` `spv.SLessThan` ssa-use, ssa-use
@@ -787,7 +785,7 @@ def SPV_SLessThanEqualOp : SPV_LogicalBinaryOp<"SLessThanEqual", SPV_Integer, []
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     sless-than-equal-op ::= ssa-id `=` `spv.SLessThanEqual` ssa-use, ssa-use
@@ -829,7 +827,7 @@ def SPV_SelectOp : SPV_Op<"Select", [NoSideEffect]> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     scalar-type ::= integer-type | float-type | boolean-type
     select-object-type ::= scalar-type
                            | `vector<` integer-literal `x` scalar-type `>`
@@ -881,7 +879,7 @@ def SPV_UGreaterThanOp : SPV_LogicalBinaryOp<"UGreaterThan", SPV_Integer, []> {
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     ugreater-than-op ::= ssa-id `=` `spv.UGreaterThan` ssa-use, ssa-use
@@ -915,7 +913,7 @@ def SPV_UGreaterThanEqualOp : SPV_LogicalBinaryOp<"UGreaterThanEqual", SPV_Integ
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     ugreater-than-equal-op ::= ssa-id `=` `spv.UGreaterThanEqual` ssa-use, ssa-use
@@ -948,7 +946,7 @@ def SPV_ULessThanOp : SPV_LogicalBinaryOp<"ULessThan", SPV_Integer, []> {
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     uless-than-op ::= ssa-id `=` `spv.ULessThan` ssa-use, ssa-use
@@ -983,7 +981,7 @@ def SPV_ULessThanEqualOp :
      Results are computed per component.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     integer-scalar-vector-type ::= integer-type |
                                  `vector<` integer-literal `x` integer-type `>`
     uless-than-equal-op ::= ssa-id `=` `spv.ULessThanEqual` ssa-use, ssa-use

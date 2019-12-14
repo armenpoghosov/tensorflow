@@ -151,8 +151,8 @@ class InputWorkers(object):
     self._fed_devices = tuple(tuple(device_util.canonicalize(d) for d in f)
                               for _, f in worker_device_pairs)
     flattened = tuple(d for l in self._fed_devices for d in l)
-    assert (flattened ==
-            device_map.logical_to_actual_devices(logical_device)), (
+    assert (len(flattened) ==
+            len(device_map.logical_to_actual_devices(logical_device))), (
                 "flattened: %s logical device %d: %s" %
                 (flattened, logical_device,
                  device_map.logical_to_actual_devices(logical_device)))
@@ -277,6 +277,9 @@ class DistributedIterator(object):
       return self.get_next()
     except errors.OutOfRangeError:
       raise StopIteration
+
+  def __iter__(self):
+    return self
 
   def get_next(self, name=None):
     """Returns the next input from the iterator for all replicas."""

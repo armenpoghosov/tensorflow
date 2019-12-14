@@ -19,21 +19,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifdef AFFINE_OPS
-#else
+#ifndef AFFINE_OPS
 #define AFFINE_OPS
 
-#ifdef OP_BASE
-#else
-include "mlir/IR/OpBase.td"
-#endif // OP_BASE
-
-#ifdef MLIR_LOOPLIKEINTERFACE
-#else
-include "mlir/Transforms/LoopLikeInterface.td"
-#endif
-
 include "mlir/Dialect/AffineOps/AffineOpsBase.td"
+include "mlir/IR/OpBase.td"
+include "mlir/Transforms/LoopLikeInterface.td"
 
 def Affine_Dialect : Dialect {
   let name = "affine";
@@ -99,8 +90,8 @@ def AffineForOp : Affine_Op<"for",
     OpBuilder<"Builder *builder, OperationState &result, "
               "int64_t lowerBound, int64_t upperBound, int64_t step = 1">,
     OpBuilder<"Builder *builder, OperationState &result, "
-              "ArrayRef<Value *> lbOperands, AffineMap lbMap, "
-              "ArrayRef<Value *> ubOperands, AffineMap ubMap, "
+              "ValueRange lbOperands, AffineMap lbMap, "
+              "ValueRange ubOperands, AffineMap ubMap, "
               "int64_t step = 1">
   ];
 
@@ -148,10 +139,10 @@ def AffineForOp : Affine_Op<"for",
 
     /// Set lower bound. The new bound must have the same number of operands as
     /// the current bound map. Otherwise, 'replaceForLowerBound' should be used.
-    void setLowerBound(ArrayRef<Value *> operands, AffineMap map);
+    void setLowerBound(ValueRange operands, AffineMap map);
     /// Set upper bound. The new bound must not have more operands than the
     /// current bound map. Otherwise, 'replaceForUpperBound' should be used.
-    void setUpperBound(ArrayRef<Value *> operands, AffineMap map);
+    void setUpperBound(ValueRange operands, AffineMap map);
 
     /// Set the lower bound map without changing operands.
     void setLowerBoundMap(AffineMap map);
@@ -186,12 +177,13 @@ def AffineForOp : Affine_Op<"for",
     /// Sets the upper bound to the given constant value.
     void setConstantUpperBound(int64_t value);
 
-    /// Returns true if both the lower and upper bound have the same operand 
+    /// Returns true if both the lower and upper bound have the same operand
     /// lists (same operands in the same order).
     bool matchingBoundOperandList();
   }];
 
   let hasCanonicalizer = 1;
+  let hasFolder = 1;
 }
 
 def AffineIfOp : Affine_Op<"if", [ImplicitAffineTerminator]> {
@@ -222,7 +214,7 @@ def AffineIfOp : Affine_Op<"if", [ImplicitAffineTerminator]> {
 
   let builders = [
     OpBuilder<"Builder *builder, OperationState &result, "
-              "IntegerSet set, ArrayRef<Value *> args, bool withElseRegion">
+              "IntegerSet set, ValueRange args, bool withElseRegion">
   ];
 
   let extraClassDeclaration = [{
@@ -234,7 +226,7 @@ def AffineIfOp : Affine_Op<"if", [ImplicitAffineTerminator]> {
     /// Sets the integer set with its operands. The size of 'operands' must not
     /// exceed the current number of operands for this instance, as the operands
     /// list of AffineIf is not resizable.
-    void setConditional(IntegerSet set, ArrayRef<Value *> operands);
+    void setConditional(IntegerSet set, ValueRange operands);
 
     OpBuilder getThenBodyBuilder() {
       assert(!thenRegion().empty() && "Unexpected empty 'then' region.");
@@ -248,7 +240,25 @@ def AffineIfOp : Affine_Op<"if", [ImplicitAffineTerminator]> {
     }
   }];
 
-  let hasCanonicalizer = 1;
+  let hasFolder = 1;
+}
+
+def AffineMinOp : Affine_Op<"min"> {
+  let summary = "min operation";
+  let description = [{
+    The "min" operation computes the minimum value result from a multi-result
+    affine map.
+
+    Example:
+
+       %0 = affine.min (d0) -> (1000, d0 + 512) (%i0) : index
+  }];
+  let arguments = (ins AffineMapAttr:$map, Variadic<Index>:$operands);
+  let results = (outs Index);
+  let extraClassDeclaration = [{
+    static StringRef getMapAttrName() { return "map"; }
+  }];
+  let hasFolder = 1;
 }
 
 def AffineTerminatorOp :

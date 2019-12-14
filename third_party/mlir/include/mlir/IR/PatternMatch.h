@@ -302,9 +302,9 @@ public:
     return OpTy();
   }
 
-  /// This is implemented to create the specified operations and serves as a
+  /// This is implemented to insert the specified operation and serves as a
   /// notification hook for rewriters that want to know about new operations.
-  virtual Operation *createOperation(const OperationState &state) = 0;
+  virtual Operation *insert(Operation *op) = 0;
 
   /// Move the blocks that belong to "region" before the given position in
   /// another region "parent". The two regions must be different. The caller
@@ -331,9 +331,9 @@ public:
   /// clients can specify a list of other nodes that this replacement may make
   /// (perhaps transitively) dead.  If any of those values are dead, this will
   /// remove them as well.
-  virtual void replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                         ArrayRef<Value *> valuesToRemoveIfDead);
-  void replaceOp(Operation *op, ArrayRef<Value *> newValues) {
+  virtual void replaceOp(Operation *op, ValueRange newValues,
+                         ValueRange valuesToRemoveIfDead);
+  void replaceOp(Operation *op, ValueRange newValues) {
     replaceOp(op, newValues, llvm::None);
   }
 
@@ -349,7 +349,7 @@ public:
   /// The result values of the two ops must be the same types.  This allows
   /// specifying a list of ops that may be removed if dead.
   template <typename OpTy, typename... Args>
-  void replaceOpWithNewOp(ArrayRef<Value *> valuesToRemoveIfDead, Operation *op,
+  void replaceOpWithNewOp(ValueRange valuesToRemoveIfDead, Operation *op,
                           Args &&... args) {
     auto newOp = create<OpTy>(op->getLoc(), std::forward<Args>(args)...);
     replaceOpWithResultsOfAnotherOp(op, newOp.getOperation(),
@@ -359,11 +359,16 @@ public:
   /// This method erases an operation that is known to have no uses.
   virtual void eraseOp(Operation *op);
 
+  /// Merge the operations of block 'source' into the end of block 'dest'.
+  /// 'source's predecessors must either be empty or only contain 'dest`.
+  /// 'argValues' is used to replace the block arguments of 'source' after
+  /// merging.
+  virtual void mergeBlocks(Block *source, Block *dest,
+                           ValueRange argValues = llvm::None);
+
   /// Split the operations starting at "before" (inclusive) out of the given
   /// block into a new block, and return it.
-  virtual Block *splitBlock(Block *block, Block::iterator before) {
-    return block->splitBlock(before);
-  }
+  virtual Block *splitBlock(Block *block, Block::iterator before);
 
   /// This method is used as the final notification hook for patterns that end
   /// up modifying the pattern root in place, by changing its operands.  This is
@@ -373,8 +378,7 @@ public:
   /// The valuesToRemoveIfDead list is an optional list of values that the
   /// rewriter should remove if they are dead at this point.
   ///
-  void updatedRootInPlace(Operation *op,
-                          ArrayRef<Value *> valuesToRemoveIfDead = {});
+  void updatedRootInPlace(Operation *op, ValueRange valuesToRemoveIfDead = {});
 
 protected:
   explicit PatternRewriter(MLIRContext *ctx) : OpBuilder(ctx) {}
@@ -401,7 +405,7 @@ private:
   /// op and newOp are known to have the same number of results, replace the
   /// uses of op with uses of newOp
   void replaceOpWithResultsOfAnotherOp(Operation *op, Operation *newOp,
-                                       ArrayRef<Value *> valuesToRemoveIfDead);
+                                       ValueRange valuesToRemoveIfDead);
 };
 
 //===----------------------------------------------------------------------===//

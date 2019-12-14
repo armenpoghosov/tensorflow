@@ -30,7 +30,6 @@ import numpy as np
 import six
 from six.moves import zip  # pylint: disable=redefined-builtin
 
-from tensorflow.python import pywrap_tensorflow
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import errors
@@ -54,6 +53,7 @@ from tensorflow.python.keras.utils.io_utils import ask_to_proceed_with_overwrite
 from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_management
+from tensorflow.python.training import py_checkpoint_reader
 from tensorflow.python.training.tracking import base as trackable
 from tensorflow.python.training.tracking import data_structures
 from tensorflow.python.training.tracking import layer_utils as trackable_layer_utils
@@ -813,7 +813,17 @@ class Network(base_layer.Layer):
     # the future and 2) Keras is a major user of Network.  If you don't
     # use masking, it does not interfere with regular behavior at all and you
     # can ignore it.
-    inputs = nest.flatten(inputs)
+
+    if isinstance(inputs, dict) and isinstance(self._nested_inputs,
+                                               (list, tuple)):
+      # Backwards compat: Allows passing a dict to a Model constructed with a
+      # list. Matches dict keys to input names.
+      inputs = [
+          inputs[inp._keras_history.layer.name] for inp in self._nested_inputs
+      ]
+    else:
+      inputs = nest.flatten(inputs)
+
     if mask is None:
       masks = [None for _ in range(len(inputs))]
     else:
@@ -827,6 +837,14 @@ class Network(base_layer.Layer):
 
     for x, y in zip(self.inputs, inputs):
       tensor_dict[str(id(x))] = y
+      if isinstance(x, ops.Tensor) and isinstance(y, ops.Tensor):
+        try:
+          y.set_shape(y.shape.merge_with(x.shape))
+        except ValueError:
+          logging.warning(
+              'Model was constructed with shape {} for input {}, but it was '
+              're-called on a Tensor with incompatible shape {}.'
+              .format(x, x.shape, y.shape))
 
     depth_keys = list(self._nodes_by_depth.keys())
     depth_keys.sort(reverse=True)
@@ -965,8 +983,8 @@ class Network(base_layer.Layer):
             target location, or provide the user with a manual prompt.
         include_optimizer: If True, save optimizer's state together.
         save_format: Either 'tf' or 'h5', indicating whether to save the model
-            to Tensorflow SavedModel or HDF5. The default is currently 'h5', but
-            will switch to 'tf' in TensorFlow 2.0.
+            to Tensorflow SavedModel or HDF5. Defaults to 'tf' in TF 2.X, and
+            'h5' in TF 1.X.
         signatures: Signatures to save with the SavedModel. Applicable to the
             'tf' format only. Please see the `signatures` argument in
             `tf.saved_model.save` for details.
@@ -1166,7 +1184,7 @@ class Network(base_layer.Layer):
       save_format = 'h5'
     else:
       try:
-        pywrap_tensorflow.NewCheckpointReader(filepath)
+        py_checkpoint_reader.NewCheckpointReader(filepath)
         save_format = 'tf'
       except errors_impl.DataLossError:
         # The checkpoint is not readable in TensorFlow format. Try HDF5.
@@ -1823,13 +1841,7 @@ def reconstruct_from_config(config, custom_objects=None, created_layers=None):
     # Call layer on its inputs, thus creating the node
     # and building the layer if needed.
     if input_tensors is not None:
-      # Preserve compatibility with older configs
-      flat_input_tensors = nest.flatten(input_tensors)
-      # If this is a single element but not a dict, unwrap. If this is a dict,
-      # assume the first layer expects a dict (as is the case with a
-      # DenseFeatures layer); pass through.
-      if not isinstance(input_tensors, dict) and len(flat_input_tensors) == 1:
-        input_tensors = flat_input_tensors[0]
+      input_tensors = base_layer_utils.unnest_if_single_tensor(input_tensors)
       output_tensors = layer(input_tensors, **kwargs)
 
       # Update node index map.

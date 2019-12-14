@@ -67,7 +67,7 @@ public:
     ArrayRef<Type> getConvertedTypes() const { return argTypes; }
 
     /// Get the input mapping for the given argument.
-    llvm::Optional<InputMapping> const &getInputMapping(unsigned input) const {
+    Optional<InputMapping> getInputMapping(unsigned input) const {
       return remappedInputs[input];
     }
 
@@ -322,26 +322,27 @@ public:
   ConversionPatternRewriter(MLIRContext *ctx, TypeConverter *converter);
   ~ConversionPatternRewriter() override;
 
-  /// Apply a signature conversion to the entry block of the given region.
-  void applySignatureConversion(Region *region,
-                                TypeConverter::SignatureConversion &conversion);
+  /// Apply a signature conversion to the entry block of the given region. This
+  /// replaces the entry block with a new block containing the updated
+  /// signature. The new entry block to the region is returned for convenience.
+  Block *
+  applySignatureConversion(Region *region,
+                           TypeConverter::SignatureConversion &conversion);
 
   /// Replace all the uses of the block argument `from` with value `to`.
   void replaceUsesOfBlockArgument(BlockArgument *from, Value *to);
 
-  /// Clone the given operation without cloning its regions.
-  Operation *cloneWithoutRegions(Operation *op);
-  template <typename OpT> OpT cloneWithoutRegions(OpT op) {
-    return cast<OpT>(cloneWithoutRegions(op.getOperation()));
-  }
+  /// Return the converted value that replaces 'key'. Return 'key' if there is
+  /// no such a converted value.
+  Value *getRemappedValue(Value *key);
 
   //===--------------------------------------------------------------------===//
   // PatternRewriter Hooks
   //===--------------------------------------------------------------------===//
 
   /// PatternRewriter hook for replacing the results of an operation.
-  void replaceOp(Operation *op, ArrayRef<Value *> newValues,
-                 ArrayRef<Value *> valuesToRemoveIfDead) override;
+  void replaceOp(Operation *op, ValueRange newValues,
+                 ValueRange valuesToRemoveIfDead) override;
   using PatternRewriter::replaceOp;
 
   /// PatternRewriter hook for erasing a dead operation. The uses of this
@@ -351,6 +352,9 @@ public:
 
   /// PatternRewriter hook for splitting a block into two parts.
   Block *splitBlock(Block *block, Block::iterator before) override;
+
+  /// PatternRewriter hook for merging a block into another.
+  void mergeBlocks(Block *source, Block *dest, ValueRange argValues) override;
 
   /// PatternRewriter hook for moving blocks out of a region.
   void inlineRegionBefore(Region &region, Region &parent,
@@ -366,8 +370,8 @@ public:
                          BlockAndValueMapping &mapping) override;
   using PatternRewriter::cloneRegionBefore;
 
-  /// PatternRewriter hook for creating a new operation.
-  Operation *createOperation(const OperationState &state) override;
+  /// PatternRewriter hook for inserting a new operation.
+  Operation *insert(Operation *op) override;
 
   /// PatternRewriter hook for updating the root operation in-place.
   void notifyRootUpdated(Operation *op) override;

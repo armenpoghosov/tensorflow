@@ -30,6 +30,7 @@ limitations under the License.
 #include "mlir/Dialect/Traits.h"  // TF:local_config_mlir
 #include "mlir/IR/Attributes.h"  // TF:local_config_mlir
 #include "mlir/IR/Builders.h"  // TF:local_config_mlir
+#include "mlir/IR/DialectImplementation.h"  // TF:local_config_mlir
 #include "mlir/IR/Function.h"  // TF:local_config_mlir
 #include "mlir/IR/MLIRContext.h"  // TF:local_config_mlir
 #include "mlir/IR/Matchers.h"  // TF:local_config_mlir
@@ -131,15 +132,19 @@ TensorFlowExecutorDialect::TensorFlowExecutorDialect(MLIRContext *context)
   addTypes<ControlType, TokenType>();
 }
 
-Type TensorFlowExecutorDialect::parseType(StringRef data_type,
-                                          Location loc) const {
+Type TensorFlowExecutorDialect::parseType(DialectAsmParser &parser) const {
+  StringRef data_type;
+  if (parser.parseKeyword(&data_type)) return Type();
+
   if (data_type == "control") return ControlType::get(getContext());
   if (data_type == "token") return TokenType::get(getContext());
-  emitError(loc) << "unknown tf_executor type: " << data_type;
+  parser.emitError(parser.getNameLoc())
+      << "unknown tf_executor type: " << data_type;
   return nullptr;
 }
 
-void TensorFlowExecutorDialect::printType(Type type, raw_ostream &os) const {
+void TensorFlowExecutorDialect::printType(Type type,
+                                          DialectAsmPrinter &os) const {
   if (type.isa<ControlType>()) {
     os << "control";
     return;
@@ -264,7 +269,7 @@ ParseResult ParseGraphOp(OpAsmParser &parser, OperationState &result) {
   }
 
   // Parse the optional attribute list.
-  if (parser.parseOptionalAttributeDict(result.attributes)) return failure();
+  if (parser.parseOptionalAttrDict(result.attributes)) return failure();
 
   return success();
 }
@@ -295,7 +300,7 @@ ParseResult ParseFetchOp(OpAsmParser &parser, OperationState &result) {
   return failure(parser.parseOperandList(opInfo) ||
                  (!opInfo.empty() && parser.parseColonTypeList(types)) ||
                  parser.resolveOperands(opInfo, types, loc, result.operands) ||
-                 parser.parseOptionalAttributeDict(result.attributes)
+                 parser.parseOptionalAttrDict(result.attributes)
 
   );
 }
@@ -403,8 +408,7 @@ ParseResult ParseIslandOp(OpAsmParser &parser, OperationState &result) {
     if (!wrapped_op) return failure();
     OpBuilder builder(parser.getBuilder().getContext());
     builder.setInsertionPointToEnd(&block);
-    builder.create<YieldOp>(wrapped_op->getLoc(),
-                            llvm::to_vector<8>(wrapped_op->getResults()));
+    builder.create<YieldOp>(wrapped_op->getLoc(), wrapped_op->getResults());
     result.location = wrapped_op->getLoc();
   } else if (parser.parseRegion(body, llvm::None, llvm::None)) {
     return failure();
@@ -419,7 +423,7 @@ ParseResult ParseIslandOp(OpAsmParser &parser, OperationState &result) {
   result.types.push_back(control_type);
 
   // Parse the optional attribute list.
-  if (parser.parseOptionalAttributeDict(result.attributes)) return failure();
+  if (parser.parseOptionalAttrDict(result.attributes)) return failure();
   return success();
 }
 
@@ -449,7 +453,7 @@ ParseResult ParseYieldOp(OpAsmParser &parser, OperationState &result) {
   return failure(parser.parseOperandList(op_info) ||
                  (!op_info.empty() && parser.parseColonTypeList(types)) ||
                  parser.resolveOperands(op_info, types, loc, result.operands) ||
-                 parser.parseOptionalAttributeDict(result.attributes));
+                 parser.parseOptionalAttrDict(result.attributes));
 }
 
 }  // anonymous namespace
@@ -493,7 +497,7 @@ ParseResult ParseSwitchOp(OpAsmParser &parser, OperationState &result) {
   if (parser.resolveOperands(op_infos, types, loc, result.operands))
     return failure();
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 void Print(SwitchOp switch_op, OpAsmPrinter &p) {
@@ -597,7 +601,7 @@ ParseResult ParseSwitchNOp(OpAsmParser &parser, OperationState &result) {
   result.types.append(num_outs.getInt(), types[0]);
   result.types.push_back(control_type);
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -718,7 +722,7 @@ ParseResult ParseMergeOp(OpAsmParser &parser, OperationState &result) {
   if (parser.resolveOperands(op_infos, types, loc, result.operands))
     return failure();
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -808,7 +812,7 @@ ParseResult ParseEnterOp(OpAsmParser &parser, OperationState &result) {
   if (parser.resolveOperands(op_infos, types, loc, result.operands))
     return failure();
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -842,7 +846,7 @@ ParseResult ParseNextIterationSourceOp(OpAsmParser &parser,
   Type token_type = TokenType::get(context);
   Type control_type = ControlType::get(context);
   result.addTypes({types.front(), token_type, control_type});
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -898,7 +902,7 @@ ParseResult ParseNextIterationSinkOp(OpAsmParser &parser,
   if (parser.resolveOperands(op_infos, types, loc, result.operands))
     return failure();
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -930,7 +934,7 @@ ParseResult ParseExitOp(OpAsmParser &parser, OperationState &result) {
     return failure();
 
   result.addTypes({types.front(), control_type});
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -960,7 +964,7 @@ ParseResult ParseControlTriggerOp(OpAsmParser &parser, OperationState &result) {
 
   // Single control as the only output
   result.types.push_back(control_type);
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // anonymous namespace
@@ -1020,7 +1024,7 @@ ParseResult ParseLoopCondOp(OpAsmParser &parser, OperationState &result) {
   if (parser.resolveOperands(op_infos, types, loc, result.operands))
     return failure();
 
-  return parser.parseOptionalAttributeDict(result.attributes);
+  return parser.parseOptionalAttrDict(result.attributes);
 }
 
 }  // namespace
@@ -1060,8 +1064,7 @@ struct DropEmptyGraph : public OpRewritePattern<GraphOp> {
     if (&block.front() != &block.back()) return matchFailure();
 
     // Map graph results to fetch operands.
-    llvm::SmallVector<Value *, 8> new_rets(op.GetFetch().fetches());
-    rewriter.replaceOp(op, new_rets);
+    rewriter.replaceOp(op, op.GetFetch().fetches());
 
     return matchSuccess();
   }

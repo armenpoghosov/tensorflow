@@ -4,34 +4,6 @@ package(
 )
 
 cc_library(
-    name = "abs",
-    srcs = ["abs.cc"],
-    hdrs = ["abs.h"],
-    deps = [
-        ":gpu_operation",
-        "@com_google_absl//absl/strings",
-    ],
-)
-
-cc_test(
-    name = "abs_test",
-    srcs = ["abs_test.cc"],
-    linkstatic = True,
-    tags = [
-        "linux",
-        "local",
-    ],
-    deps = [
-        ":abs",
-        ":cl_test",
-        "//tensorflow/lite/delegates/gpu/cl:tensor",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_library(
     name = "add",
     srcs = ["add.cc"],
     hdrs = ["add.h"],
@@ -468,6 +440,46 @@ cc_test(
 )
 
 cc_library(
+    name = "convolution_transposed_4x4",
+    srcs = ["convolution_transposed_4x4.cc"],
+    hdrs = ["convolution_transposed_4x4.h"],
+    deps = [
+        ":gpu_operation",
+        ":util",
+        "//tensorflow/lite/delegates/gpu/cl:buffer",
+        "//tensorflow/lite/delegates/gpu/cl:linear_storage",
+        "//tensorflow/lite/delegates/gpu/cl:precision",
+        "//tensorflow/lite/delegates/gpu/cl:tensor",
+        "//tensorflow/lite/delegates/gpu/cl:tensor_type",
+        "//tensorflow/lite/delegates/gpu/cl:util",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "//tensorflow/lite/delegates/gpu/common:types",
+    ],
+)
+
+cc_test(
+    name = "convolution_transposed_4x4_test",
+    srcs = ["convolution_transposed_4x4_test.cc"],
+    linkstatic = True,
+    tags = [
+        "linux",
+        "local",
+    ],
+    deps = [
+        ":cl_test",
+        ":convolution_transposed_4x4",
+        "//tensorflow/lite/delegates/gpu/cl:tensor",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "convolution_transposed_thin",
     srcs = ["convolution_transposed_thin.cc"],
     hdrs = ["convolution_transposed_thin.h"],
@@ -590,6 +602,36 @@ cc_test(
 )
 
 cc_library(
+    name = "elementwise",
+    srcs = ["elementwise.cc"],
+    hdrs = ["elementwise.h"],
+    deps = [
+        ":gpu_operation",
+        ":util",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "@com_google_absl//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "elementwise_test",
+    srcs = ["elementwise_test.cc"],
+    linkstatic = True,
+    tags = [
+        "linux",
+        "local",
+    ],
+    deps = [
+        ":cl_test",
+        ":elementwise",
+        "//tensorflow/lite/delegates/gpu/cl:tensor",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "flt_type",
     srcs = ["flt_type.cc"],
     hdrs = ["flt_type.h"],
@@ -655,35 +697,6 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:access_type",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:types",
-    ],
-)
-
-cc_library(
-    name = "hard_swish",
-    hdrs = ["hard_swish.h"],
-    deps = [
-        ":gpu_operation",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/strings",
-    ],
-)
-
-cc_test(
-    name = "hard_swish_test",
-    srcs = ["hard_swish_test.cc"],
-    linkstatic = True,
-    tags = [
-        "linux",
-        "local",
-    ],
-    deps = [
-        ":cl_test",
-        ":hard_swish",
-        "//tensorflow/lite/delegates/gpu/cl:tensor",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -992,37 +1005,6 @@ cc_test(
 )
 
 cc_library(
-    name = "sigmoid",
-    srcs = ["sigmoid.cc"],
-    hdrs = ["sigmoid.h"],
-    deps = [
-        ":gpu_operation",
-        ":util",
-        "//tensorflow/lite/delegates/gpu/cl:precision",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "@com_google_absl//absl/strings",
-    ],
-)
-
-cc_test(
-    name = "sigmoid_test",
-    srcs = ["sigmoid_test.cc"],
-    linkstatic = True,
-    tags = [
-        "linux",
-        "local",
-    ],
-    deps = [
-        ":cl_test",
-        ":sigmoid",
-        "//tensorflow/lite/delegates/gpu/cl:tensor",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
-
-cc_library(
     name = "softmax",
     srcs = ["softmax.cc"],
     hdrs = ["softmax.h"],
@@ -1230,7 +1212,6 @@ cc_library(
 test_suite(
     name = "all_tests",
     tests = [
-        "abs_test",
         "add_test",
         "apply_mask_test",
         "concat_test",
@@ -1240,12 +1221,13 @@ test_suite(
         "conv_powervr_test",
         "conv_texture_test",
         "convolution_transposed_3x3_thin_test",
+        "convolution_transposed_4x4_test",
         "convolution_transposed_test",
         "convolution_transposed_thin_test",
         "depth_wise_conv_3x3_test",
         "depth_wise_conv_test",
+        "elementwise_test",
         "fully_connected_texture_test",
-        "hard_swish_test",
         "max_unpooling_test",
         "multiply_add_test",
         "padding_test",
@@ -1254,7 +1236,6 @@ test_suite(
         "relu_test",
         "reshape_test",
         "reshapex4_test",
-        "sigmoid_test",
         "softmax1x1_test",
         "softmax_test",
         "strided_slice_test",

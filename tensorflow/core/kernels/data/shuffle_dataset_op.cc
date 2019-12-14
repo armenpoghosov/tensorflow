@@ -54,6 +54,7 @@ const int64 kLogIntervalMicros = 10 * 1000000;  // 10 seconds.
 const int64 kMaxEpochsInBuffer = 3;
 
 constexpr char kNumRandomSamples[] = "num_random_samples";
+constexpr char kDataProduced[] = "data_produced";
 constexpr char kEndOfInputSequence[] = "end_of_input_sequence";
 constexpr char kEpoch[] = "epoch";
 constexpr char kNumElements[] = "num_elements";
@@ -136,16 +137,14 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
                            std::vector<Tensor>* out_tensors,
                            bool* end_of_sequence) override {
       mutex_lock l(mu_);
-      int64 start_micros = ctx->env()->NowMicros();
+      int64 start_micros = EnvTime::NowMicros();
       int64 num_log_entries = 0;
-      bool first_call = false;
       if (!input_impl_ && epoch_ == 0) {
-        first_call = true;
         TF_RETURN_IF_ERROR(this->dataset()->input_->MakeIterator(
             ctx, this->prefix(), &input_impl_));
       }
       while (input_impl_ && num_elements_ < this->dataset()->buffer_size_) {
-        if (ctx->env()->NowMicros() >
+        if (EnvTime::NowMicros() >
             ((num_log_entries + 1) * kLogIntervalMicros) + start_micros) {
           num_log_entries++;
           LOG(INFO) << "Filling up shuffle buffer (this may take a while): "
@@ -158,13 +157,12 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
           TF_RETURN_IF_ERROR(input_impl_->GetNext(ctx, &input_element,
                                                   &end_of_input_sequence));
           if (!end_of_input_sequence) {
-            first_call = false;
+            data_produced_ = true;
             break;
           }
-          if (first_call && this->dataset()->count_ == -1) {
-            // If the first call to GetNext() fails because the end
-            // of sequence has been reached, we terminate the
-            // iteration immediately. (Otherwise, this iterator
+          if (!data_produced_ && this->dataset()->count_ == -1) {
+            // If we encounter the end of sequence without producing data, we
+            // terminate the iteration immediately. (Otherwise, this iterator
             // would loop infinitely and never produce a value.)
             *end_of_sequence = true;
             return Status::OK();
@@ -289,6 +287,10 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
           }
         }
       }
+      if (data_produced_) {
+        TF_RETURN_IF_ERROR(
+            writer->WriteScalar(this->full_name(kDataProduced), ""));
+      }
 
       return Status::OK();
     }
@@ -325,6 +327,7 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
       }
       buffer_ = absl::make_unique<std::vector<Tensor>[]>(
           this->dataset()->buffer_size_);
+      slices_.clear();
       for (size_t i = 0; i < slices_size; ++i) {
         int64 start;
         TF_RETURN_IF_ERROR(
@@ -352,6 +355,7 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
           }
         }
       }
+      data_produced_ = reader->Contains(this->full_name(kDataProduced));
 
       return Status::OK();
     }
@@ -384,32 +388,60 @@ class ShuffleDatasetOpBase::ShuffleDatasetBase : public DatasetBase {
     std::unique_ptr<IteratorBase> input_impl_ GUARDED_BY(mu_);
     int64 epoch_ GUARDED_BY(mu_);
     int64 num_elements_ GUARDED_BY(mu_);
+    // Indices into `buffer_` indicating which data belongs to which epoch.
+    // The slice at the front of the deque references data from the earliest
+    // buffered epoch. It is an invariant that all slices reference
+    // non-overlapping sections of `buffer_`.
     std::deque<std::unique_ptr<Slice>> slices_ GUARDED_BY(mu_);
     random::PhiloxRandom parent_generator_ GUARDED_BY(mu_);
     random::SingleSampleAdapter<random::PhiloxRandom> generator_
         GUARDED_BY(mu_);
     int64 num_random_samples_ GUARDED_BY(mu_) = 0;
+    bool data_produced_ GUARDED_BY(mu_) = false;
   };
 
   const DatasetBase* const input_;
   const int64 buffer_size_;
+  // The number of epochs to run for. Normally this is just 1, but sometimes we
+  // fuse shuffle and repeat together, and make the shuffle dataset op
+  // responsible for repeating as well.
   const int64 count_;
 };
+
+namespace {
+class Seeds {
+ public:
+  Seeds(int64 seed, int64 seed2) {
+    input_seed_ = seed;
+    input_seed2_ = seed2;
+    seed_ = seed;
+    seed2_ = seed2;
+    // By TensorFlow convention, if both seeds are 0, then shuffling should be
+    // seeded non-deterministically.
+    if (seed == 0 && seed2 == 0) {
+      seed_ = random::New64();
+      seed2_ = random::New64();
+    }
+  }
+
+  int64 input_seed_;
+  int64 input_seed2_;
+  int64 seed_;
+  int64 seed2_;
+};
+}  // namespace
 
 // A dataset that uses a pseudorandom sequence of seeds for the iterators
 // created from it. Used when `reshuffle_each_iteration` is true.
 class ShuffleDatasetOp::ReshufflingDataset : public ShuffleDatasetBase {
  public:
   ReshufflingDataset(OpKernelContext* ctx, const DatasetBase* input,
-                     int64 buffer_size, int64 seed, int64 seed2, int64 count)
-      : ShuffleDatasetBase(ctx, input, buffer_size, count),
-        seed_(seed),
-        seed2_(seed2) {}
-
+                     int64 buffer_size, Seeds seeds, int64 count)
+      : ShuffleDatasetBase(ctx, input, buffer_size, count), seeds_(seeds) {}
   string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
     params.dataset_prefix = kReshufflingDatasetPrefix;
-    params.set_args(buffer_size_, seed_, seed2_);
+    params.set_args(buffer_size_, seeds_.seed_, seeds_.seed2_);
     return name_utils::DatasetDebugString(kDatasetType, params);
   }
 
@@ -418,7 +450,7 @@ class ShuffleDatasetOp::ReshufflingDataset : public ShuffleDatasetBase {
     return absl::make_unique<Iterator>(
         Iterator::Params{this,
                          name_utils::IteratorPrefix(kDatasetType, prefix)},
-        seed_, seed2_);
+        seeds_.seed_, seeds_.seed2_);
   }
 
  protected:
@@ -511,8 +543,8 @@ class ShuffleDatasetOp::ReshufflingDataset : public ShuffleDatasetBase {
     AttrValue reshuffle_each_iteration;
 
     TF_RETURN_IF_ERROR(b->AddScalar(buffer_size_, &buffer_size));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed_, &seed));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed2_, &seed2));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed_, &seed));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed2_, &seed2));
     b->BuildAttrValue(true, &reshuffle_each_iteration);
     TF_RETURN_IF_ERROR(b->AddDataset(
         this, {input_graph_node, buffer_size, seed, seed2},  // Inputs
@@ -523,8 +555,7 @@ class ShuffleDatasetOp::ReshufflingDataset : public ShuffleDatasetBase {
   }
 
  private:
-  const int64 seed_;
-  const int64 seed2_;
+  const Seeds seeds_;
 };
 
 // A dataset that uses a pseudorandom sequence of seeds for the iterators
@@ -639,15 +670,13 @@ class ShuffleDatasetOp::ReshufflingDatasetV2 : public ShuffleDatasetBase {
 class ShuffleDatasetOp::FixedSeedDataset : public ShuffleDatasetBase {
  public:
   FixedSeedDataset(OpKernelContext* ctx, const DatasetBase* input,
-                   int64 buffer_size, int64 seed, int64 seed2, int64 count)
-      : ShuffleDatasetBase(ctx, input, buffer_size, count),
-        seed_(seed),
-        seed2_(seed2) {}
+                   int64 buffer_size, Seeds seeds, int64 count)
+      : ShuffleDatasetBase(ctx, input, buffer_size, count), seeds_(seeds) {}
 
   string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
     params.dataset_prefix = kFixedSeedDatasetPrefix;
-    params.set_args(buffer_size_, seed_, seed2_);
+    params.set_args(buffer_size_, seeds_.seed_, seeds_.seed2_);
     return name_utils::DatasetDebugString(kDatasetType, params);
   }
 
@@ -656,7 +685,7 @@ class ShuffleDatasetOp::FixedSeedDataset : public ShuffleDatasetBase {
     return absl::make_unique<ShuffleDatasetBase::Iterator<ShuffleDatasetBase>>(
         ShuffleDatasetBase::Iterator<ShuffleDatasetBase>::Params{
             this, name_utils::IteratorPrefix(kDatasetType, prefix)},
-        seed_, seed2_);
+        seeds_.seed_, seeds_.seed2_);
   }
 
  protected:
@@ -671,8 +700,8 @@ class ShuffleDatasetOp::FixedSeedDataset : public ShuffleDatasetBase {
     AttrValue reshuffle_each_iteration;
 
     TF_RETURN_IF_ERROR(b->AddScalar(buffer_size_, &buffer_size));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed_, &seed));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed2_, &seed2));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed_, &seed));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed2_, &seed2));
     b->BuildAttrValue(false, &reshuffle_each_iteration);
     TF_RETURN_IF_ERROR(b->AddDataset(
         this, {input_graph_node, buffer_size, seed, seed2},  // Inputs
@@ -683,8 +712,7 @@ class ShuffleDatasetOp::FixedSeedDataset : public ShuffleDatasetBase {
   }
 
  private:
-  const int64 seed_;
-  const int64 seed2_;
+  const Seeds seeds_;
 };
 
 ShuffleDatasetOp::ShuffleDatasetOp(OpKernelConstruction* ctx)
@@ -730,32 +758,24 @@ void ShuffleDatasetOp::MakeDataset(OpKernelContext* ctx, DatasetBase* input,
   int64 seed2;
   OP_REQUIRES_OK(ctx, ParseScalarArgument<int64>(ctx, kSeed2, &seed2));
 
-  // By TensorFlow convention, passing 0 for both seeds indicates
-  // that the shuffling should be seeded non-deterministically.
-  if (seed == 0 && seed2 == 0) {
-    seed = random::New64();
-    seed2 = random::New64();
-  }
-
   if (reshuffle_each_iteration_) {
-    *output =
-        new ReshufflingDataset(ctx, input, buffer_size, seed, seed2, count);
+    *output = new ReshufflingDataset(ctx, input, buffer_size,
+                                     Seeds(seed, seed2), count);
   } else {
-    *output = new FixedSeedDataset(ctx, input, buffer_size, seed, seed2, count);
+    *output = new FixedSeedDataset(ctx, input, buffer_size, Seeds(seed, seed2),
+                                   count);
   }
 }
 
 class ShuffleAndRepeatDatasetOp::Dataset : public ShuffleDatasetBase {
  public:
   Dataset(OpKernelContext* ctx, const DatasetBase* input, int64 buffer_size,
-          int64 seed, int64 seed2, int64 count)
-      : ShuffleDatasetBase(ctx, input, buffer_size, count),
-        seed_(seed),
-        seed2_(seed2) {}
+          Seeds seeds, int64 count)
+      : ShuffleDatasetBase(ctx, input, buffer_size, count), seeds_(seeds) {}
 
   string DebugString() const override {
     name_utils::DatasetDebugStringParams params;
-    params.set_args(buffer_size_, seed_, seed2_);
+    params.set_args(buffer_size_, seeds_.seed_, seeds_.seed2_);
     return name_utils::DatasetDebugString(kDatasetType, params);
   }
 
@@ -764,7 +784,7 @@ class ShuffleAndRepeatDatasetOp::Dataset : public ShuffleDatasetBase {
     return absl::make_unique<ShuffleDatasetBase::Iterator<ShuffleDatasetBase>>(
         ShuffleDatasetBase::Iterator<ShuffleDatasetBase>::Params{
             this, name_utils::IteratorPrefix(kDatasetType, prefix)},
-        seed_, seed2_);
+        seeds_.seed_, seeds_.seed2_);
   }
 
  protected:
@@ -779,8 +799,8 @@ class ShuffleAndRepeatDatasetOp::Dataset : public ShuffleDatasetBase {
     Node* count = nullptr;
 
     TF_RETURN_IF_ERROR(b->AddScalar(buffer_size_, &buffer_size));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed_, &seed));
-    TF_RETURN_IF_ERROR(b->AddScalar(seed2_, &seed2));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed_, &seed));
+    TF_RETURN_IF_ERROR(b->AddScalar(seeds_.input_seed2_, &seed2));
     TF_RETURN_IF_ERROR(b->AddScalar(count_, &count));
     TF_RETURN_IF_ERROR(b->AddDataset(
         this, {input_graph_node, buffer_size, seed, seed2, count},  // Inputs
@@ -790,8 +810,7 @@ class ShuffleAndRepeatDatasetOp::Dataset : public ShuffleDatasetBase {
   }
 
  private:
-  const int64 seed_;
-  const int64 seed2_;
+  const Seeds seeds_;
 };
 
 ShuffleAndRepeatDatasetOp::ShuffleAndRepeatDatasetOp(OpKernelConstruction* ctx)
@@ -820,14 +839,7 @@ void ShuffleAndRepeatDatasetOp::MakeDataset(OpKernelContext* ctx,
               errors::InvalidArgument(
                   "count must be greater than zero or equal to -1."));
 
-  // By TensorFlow convention, if both seeds are 0, then shuffling should be
-  // seeded non-deterministically.
-  if (seed == 0 && seed2 == 0) {
-    seed = random::New64();
-    seed2 = random::New64();
-  }
-
-  *output = new Dataset(ctx, input, buffer_size, seed, seed2, count);
+  *output = new Dataset(ctx, input, buffer_size, Seeds(seed, seed2), count);
 }
 
 namespace {

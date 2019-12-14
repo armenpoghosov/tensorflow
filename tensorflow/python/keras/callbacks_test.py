@@ -828,6 +828,18 @@ class KerasCallbacksTest(keras_parameterized.TestCase):
                                           'filepath for ModelCheckpoint.'):
       model.fit(train_ds, epochs=1, callbacks=[callback])
 
+  def test_ModelCheckpoint_with_bad_path_placeholders(self):
+    (model, train_ds, callback,
+     filepath) = self._get_dummy_resource_for_model_checkpoint_testing()
+
+    temp_dir = self.get_temp_dir()
+    filepath = os.path.join(temp_dir, 'chkpt_{epoch:02d}_{mape:.2f}.h5')
+    callback = keras.callbacks.ModelCheckpoint(filepath=filepath)
+
+    with self.assertRaisesRegexp(KeyError, 'Failed to format this callback '
+                                           'filepath.*'):
+      model.fit(train_ds, epochs=1, callbacks=[callback])
+
   def test_EarlyStopping(self):
     with self.cached_session():
       np.random.seed(123)
@@ -1377,6 +1389,15 @@ class KerasCallbacksTest(keras_parameterized.TestCase):
             validation_data=(x_test, y_test),
             callbacks=cbks,
             epochs=1)
+
+  def test_callback_params_samples(self):
+    x, y = np.ones((64, 3)), np.ones((64, 2))
+    model = testing_utils.get_small_sequential_mlp(
+        num_hidden=10, num_classes=2, input_dim=3)
+    model.compile('sgd', 'mse')
+    callback = keras.callbacks.Callback()
+    model.evaluate(x, y, callbacks=[callback])
+    self.assertEqual(callback.params['samples'], 64)
 
 
 # A summary that was emitted during a test. Fields:

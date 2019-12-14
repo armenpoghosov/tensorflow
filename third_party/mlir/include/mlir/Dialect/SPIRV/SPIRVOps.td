@@ -20,57 +20,28 @@
 //
 //===----------------------------------------------------------------------===//
 
-// Note that for each op in this file, we use a tool to automatically generate
-// certain sections in its definition: basic structure, summary, description.
-// So modifications to these sections will not be respected. Modifications to
-// op traits, arguments, results, and sections after the results are retained.
-// Besides, ops in this file must be separated via the '// -----' marker.
+// Note that for each op in this file and the included files for specific op
+// categories, we use a tool to automatically generate certain sections in its
+// definition: basic structure, summary, description. So modifications to these
+// sections will not be respected. Modifications to op traits, arguments,
+// results, and sections after the results are retained. Besides, ops must be
+// separated via the '// -----' marker.
 
-#ifdef SPIRV_OPS
-#else
+#ifndef SPIRV_OPS
 #define SPIRV_OPS
 
-#ifdef SPIRV_BASE
-#else
 include "mlir/Dialect/SPIRV/SPIRVBase.td"
-#endif // SPIRV_BASE
-
-#ifdef SPIRV_ARITHMETIC_OPS
-#else
 include "mlir/Dialect/SPIRV/SPIRVArithmeticOps.td"
-#endif // SPIRV_ARITHMETIC_OPS
-
-#ifdef SPIRV_BIT_OPS
-#else
+include "mlir/Dialect/SPIRV/SPIRVAtomicOps.td"
 include "mlir/Dialect/SPIRV/SPIRVBitOps.td"
-#endif // SPIRV_BIT_OPS
-
-#ifdef SPIRV_CAST_OPS
-#else
 include "mlir/Dialect/SPIRV/SPIRVCastOps.td"
-#endif // SPIRV_CAST_OPS
-
-#ifdef SPIRV_CONTROLFLOW_OPS
-#else
+include "mlir/Dialect/SPIRV/SPIRVCompositeOps.td"
 include "mlir/Dialect/SPIRV/SPIRVControlFlowOps.td"
-#endif // SPIRV_CONTROLFLOW_OPS
-
-#ifdef SPIRV_LOGICAL_OPS
-#else
-include "mlir/Dialect/SPIRV/SPIRVLogicalOps.td"
-#endif // SPIRV_LOGICAL_OPS
-
-#ifdef SPIRV_STRUCTURE_OPS
-#else
-// Pull in ops for defining the SPIR-V module structure
-include "mlir/Dialect/SPIRV/SPIRVStructureOps.td"
-#endif // SPIRV_STRUCTURE_OPS
-
-#ifdef SPIRV_GLSL_OPS
-#else
-// Pull in ops for extended instruction set for GLSL
 include "mlir/Dialect/SPIRV/SPIRVGLSLOps.td"
-#endif // SPIRV_GLSL_OPS
+include "mlir/Dialect/SPIRV/SPIRVGroupOps.td"
+include "mlir/Dialect/SPIRV/SPIRVLogicalOps.td"
+include "mlir/Dialect/SPIRV/SPIRVNonUniformOps.td"
+include "mlir/Dialect/SPIRV/SPIRVStructureOps.td"
 
 // -----
 
@@ -105,7 +76,7 @@ def SPV_AccessChainOp : SPV_Op<"AccessChain", [NoSideEffect]> {
     - must be an OpConstant when indexing into a structure.
 
     ### Custom assembly form
-    ``` {.ebnf}
+    ```
     access-chain-op ::= ssa-id `=` `spv.AccessChain` ssa-use
                         `[` ssa-use (',' ssa-use)* `]`
                         `:` pointer-type
@@ -131,55 +102,9 @@ def SPV_AccessChainOp : SPV_Op<"AccessChain", [NoSideEffect]> {
   );
 
   let builders = [OpBuilder<[{Builder *builder, OperationState &state,
-                              Value *basePtr, ArrayRef<Value *> indices}]>];
+                              Value *basePtr, ValueRange indices}]>];
 
   let hasCanonicalizer = 1;
-}
-
-// -----
-
-def SPV_CompositeExtractOp : SPV_Op<"CompositeExtract", [NoSideEffect]> {
-  let summary = "Extract a part of a composite object.";
-
-  let description = [{
-    Result Type must be the type of object selected by the last provided
-    index.  The instruction result is the extracted object.
-
-    Composite is the composite to extract from.
-
-    Indexes walk the type hierarchy, potentially down to component
-    granularity, to select the part to extract. All indexes must be in
-    bounds.  All composite constituents use zero-based numbering, as
-    described by their OpType… instruction.
-
-    ### Custom assembly form
-
-    ``` {.ebnf}
-    composite-extract-op ::= ssa-id `=` `spv.CompositeExtract` ssa-use
-                             `[` integer-literal (',' integer-literal)* `]`
-                             `:` composite-type
-    ```
-
-    For example:
-
-    ```
-    %0 = spv.Variable : !spv.ptr<!spv.array<4x!spv.array<4xf32>>, Function>
-    %1 = spv.Load "Function" %0 ["Volatile"] : !spv.array<4x!spv.array<4xf32>>
-    %2 = spv.CompositeExtract %1[1 : i32] : !spv.array<4x!spv.array<4xf32>>
-    ```
-
-  }];
-
-  let arguments = (ins
-    SPV_Composite:$composite,
-    I32ArrayAttr:$indices
-  );
-
-  let results = (outs
-    SPV_Type:$component
-  );
-
-  let hasFolder = 1;
 }
 
 // -----
@@ -219,7 +144,7 @@ def SPV_ControlBarrierOp : SPV_Op<"ControlBarrier", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     scope ::= `"CrossDevice"` | `"Device"` | `"Workgroup"` | ...
 
     memory-semantics ::= `"None"` | `"Acquire"` | "Release"` | ...
@@ -265,7 +190,7 @@ def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [InModuleScope]> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     execution-mode ::= "Invocations" | "SpacingEqual" |
                        <and other SPIR-V execution modes...>
 
@@ -282,7 +207,7 @@ def SPV_ExecutionModeOp : SPV_Op<"ExecutionMode", [InModuleScope]> {
   }];
 
   let arguments = (ins
-    SymbolRefAttr:$fn,
+    FlatSymbolRefAttr:$fn,
     SPV_ExecutionModeAttr:$execution_mode,
     I32ArrayAttr:$values
   );
@@ -318,7 +243,7 @@ def SPV_LoadOp : SPV_Op<"Load", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     memory-access ::= `"None"` | `"Volatile"` | `"Aligned", ` integer-literal
                     | `"NonTemporal"`
 
@@ -373,7 +298,7 @@ def SPV_MemoryBarrierOp : SPV_Op<"MemoryBarrier", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     scope ::= `"CrossDevice"` | `"Device"` | `"Workgroup"` | ...
 
     memory-semantics ::= `"None"` | `"Acquire"` | `"Release"` | ...
@@ -418,7 +343,7 @@ def SPV_StoreOp : SPV_Op<"Store", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     store-op ::= `spv.Store ` storage-class ssa-use `, ` ssa-use `, `
                   (`[` memory-access `]`)? `:` spirv-element-type
     ```
@@ -466,8 +391,8 @@ def SPV_UndefOp : SPV_Op<"undef", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
-    undef-op ::= `spv.undef` `:` sprirv-type
+    ```
+    undef-op ::= `spv.undef` `:` spirv-type
     ```
 
     For example:
@@ -514,7 +439,7 @@ def SPV_VariableOp : SPV_Op<"Variable", []> {
 
     ### Custom assembly form
 
-    ``` {.ebnf}
+    ```
     variable-op ::= ssa-id `=` `spv.Variable` (`init(` ssa-use `)`)?
                     (`bind(` integer-literal, integer-literal `)`)?
                     (`built_in(` string-literal `)`)?
